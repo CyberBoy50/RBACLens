@@ -4,12 +4,13 @@ A command-line tool, written in Python, that reads a folder of Kubernetes
 YAML manifests and finds the permissions and workload settings attackers
 abuse — then grades the whole folder with a score and a letter grade.
 
-**Version:** 1.0
+**Version:** 1.1
 **Author:** CyberBoy50
 
-> Lab use only. Audit only manifests you own or have written permission to
-> audit. The tool works on **files only** — it never talks to a live cluster,
-> needs no credentials and no network.
+> Lab use only. Audit only manifests or clusters you own or have written
+> permission to audit. File scans need no credentials and no network; live
+> mode (v1.1) reads your own cluster through kubectl — read-only, nothing
+> is written to the cluster.
 
 ## What it finds
 
@@ -31,9 +32,11 @@ Kubescape, kube-score, rbac-tool, Krane, KubeSec, Conftest and more):
 
 - **RBAC checks are on by default.** KubeLinter hides cluster-admin and
   wildcard checks behind opt-in config; kubeaudit and kube-score have none.
-- **Files only, no live cluster.** rbac-tool and Krane need a cluster and
-  admin read access; RBACLens audits exported YAML anywhere, including CI
-  and air-gapped labs.
+- **Files first, live cluster too (v1.1).** rbac-tool and Krane need a
+  cluster and admin read access; RBACLens audits exported YAML anywhere,
+  including CI and air-gapped labs — and with `--live` it audits your own
+  cluster through kubectl (read-only `get`), running the exact same 25
+  rules on what is actually running.
 - **Image digest pinning.** No reviewed tool checks digests; RBACLens does.
 - **Score + grade.** Polaris-style 0–100 score and A–F grade, so a folder
   can be gated in CI (`--fail-on critical`).
@@ -109,12 +112,32 @@ python run.py inventory ./my-manifests
 
 Exit codes: `0` clean, `1` findings, `2` critical findings (or `--fail-on` hit).
 
+## Live cluster mode (v1.1)
+
+The same 25 rules, run against what is actually deployed in your own
+cluster — through one read-only `kubectl get`. Nothing is created,
+changed or deleted on the cluster.
+
+```bash
+python run.py live                        # all namespaces, menu option 8
+python run.py live --namespace kube-system
+python rbaclens.py --live --context my-cluster -o live_report.txt
+python rbaclens.py --live --inventory     # inventory of the live cluster
+```
+
+Requirements: `kubectl` on PATH and a working kubeconfig (a local
+`minikube` / `kind` cluster is enough to try it). Without a cluster,
+`python run.py doctor` says so and file scans still work. To test the
+live path without a real cluster, the step tests (step 8) run it against
+a fake `kubectl` that prints the bad test manifests — same 16 objects,
+same 46 findings.
+
 ## Try it on the test manifests
 
 ```bash
 python run.py scan test_manifests/bad     # 46 findings, score 0/100, grade F
 python run.py scan test_manifests/clean   # 0 findings, score 100/100, grade A
-python run.py test                        # the 7 build-plan step tests
+python run.py test                        # the 8 step tests (incl. live mode)
 ```
 
 ## Scoring

@@ -8,12 +8,18 @@ Step 4 — wildcard detection (planted wildcard flagged, specific rule not)
 Step 5 — workload checks (3 planted flaws all reported, clean Deployment passes)
 Step 6 — CLI arguments and report (two folders, both reports complete)
 Step 7 — full run on a test folder (every planted flaw in the report)
+Step 8 — live-cluster mode (v1.1): a fake kubectl prints the bad
+manifests as a kind: List dump; collect_live() must find the same
+16 objects and 46 findings, and missing/failing kubectl must fail
+loudly instead of scanning nothing.
 
 Run:  python run.py test        or        python test_rbaclens.py
 """
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -160,10 +166,80 @@ def step7():
     check("clean folder has zero findings", len(findings2) == 0)
 
 
+def step8():
+    print("Step 8 — live-cluster mode (fake kubectl)")
+    import yaml
+    # Assemble a kind: List dump from the bad manifests, the way
+    # `kubectl get ... -o yaml` returns them.
+    items = []
+    for name in ("rbac-bad.yaml", "workload-bad.yaml", "mixed.yaml"):
+        with open(os.path.join(BAD, name), encoding="utf-8") as fh:
+            for doc in yaml.safe_load_all(fh):
+                if not isinstance(doc, dict):
+                    continue
+                if doc.get("kind") == "List":
+                    items.extend(doc.get("items") or [])
+                elif doc.get("kind"):
+                    items.append(doc)
+    tmpdir = tempfile.mkdtemp(prefix="rbaclens-fake-kubectl-")
+    dump = os.path.join(tmpdir, "cluster-dump.yaml")
+    with open(dump, "w", encoding="utf-8") as fh:
+        yaml.safe_dump({"apiVersion": "v1", "kind": "List", "items": items},
+                       fh)
+    script = os.path.join(tmpdir, "kubectl")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write("#!/bin/sh\ncat %s\n" % dump)
+    os.chmod(script, 0o755)
+    old_path = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = tmpdir + os.pathsep + old_path
+        objects, errors = rbaclens.collect_live()
+        check("fake kubectl returns 16 objects", len(objects) == 16,
+              "(%d)" % len(objects))
+        check("no parse errors", not errors)
+        inv = rbaclens.Inventory(objects)
+        findings = rbaclens.run_all_checks(inv)
+        check("live scan finds 46 findings", len(findings) == 46,
+              "(%d)" % len(findings))
+        check("live findings tagged live-cluster",
+              all(f["file"] == "live-cluster" for f in findings))
+        check("live scan finds cluster-admin",
+              any(f["rule"] == "RBAC-001" for f in findings))
+        check("live score is 0/100",
+              rbaclens.score_findings(findings) == 0)
+        # kubectl exits 1 -> loud error, not an empty scan.
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho 'Unable to connect to the server' >&2\n"
+                     "exit 1\n")
+        os.chmod(script, 0o755)
+        try:
+            rbaclens.collect_live()
+            check("failing kubectl raises", False)
+        except ValueError as exc:
+            check("failing kubectl raises", "kubectl failed" in str(exc),
+                  "(%s)" % exc)
+    finally:
+        os.environ["PATH"] = old_path
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    # No kubectl at all -> loud error.
+    empty = tempfile.mkdtemp(prefix="rbaclens-no-kubectl-")
+    try:
+        os.environ["PATH"] = empty
+        try:
+            rbaclens.collect_live()
+            check("missing kubectl raises", False)
+        except ValueError as exc:
+            check("missing kubectl raises", "kubectl not found" in str(exc),
+                  "(%s)" % exc)
+    finally:
+        os.environ["PATH"] = old_path
+        shutil.rmtree(empty, ignore_errors=True)
+
+
 def run_all_tests():
     print("RBACLens step tests")
     print("=" * 50)
-    for step in (step1, step2, step3, step4, step5, step6, step7):
+    for step in (step1, step2, step3, step4, step5, step6, step7, step8):
         step()
         print()
     print("=" * 50)

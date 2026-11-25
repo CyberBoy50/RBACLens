@@ -9,21 +9,25 @@ containers, hostPath volumes, host networking, missing runAsNonRoot,
 missing resource limits, service-account tokens, image tags and digests,
 and missing NetworkPolicies.
 
-It works on FILES ONLY — no live cluster, no credentials, no network.
-Point it at your own manifests (or a folder you exported with kubectl),
-never at a real cluster or a repository you do not own.
+It works on FILES — a folder of manifests — or LIVE on your own cluster
+via kubectl (read-only `kubectl get`, nothing is written to the cluster).
+Point it at your own manifests or your own cluster, never at a cluster
+or a repository you do not own.
 
-Version: 1.0
+Version: 1.1
 """
 import argparse
+import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
 
-VERSION = "1.0"
+VERSION = "1.1"
 AUTHOR = "CyberBoy50"
 
 try:
@@ -137,7 +141,7 @@ def banner():
     # TraceRecon-style box under the banner, like SSTIProbe.
     print(f"{C.GRN}")
     print("┌" + "─" * 50 + "┐")
-    print("│" + ("RBACLens v" + VERSION + " — files only, no live cluster").center(50) + "│")
+    print("│" + ("RBACLens v" + VERSION + " — files + live cluster (kubectl)").center(50) + "│")
     print("│" + "For authorized use only".center(50) + "│")
     print("└" + "─" * 50 + "┘")
     print(f"{C.RST}", end="")
@@ -316,6 +320,67 @@ def collect_manifests(path):
                 objects.append(obj)
         except (ValueError, OSError) as exc:
             errors.append("%s" % exc)
+    return objects, errors
+
+
+# ---------------------------------------------------------------- live cluster
+# Resource types the checks understand. kubectl -o yaml returns them as
+# one kind: List document, which the same StrictLoader parses.
+LIVE_RESOURCES = (
+    "roles,clusterroles,rolebindings,clusterrolebindings,"
+    "serviceaccounts,deployments,daemonsets,statefulsets,"
+    "jobs,cronjobs,pods,networkpolicies"
+)
+
+
+def collect_live(kubectl="kubectl", namespace=None, context=None):
+    """Fetch resources from a live cluster and return (objects, errors)
+    — the same shape as collect_manifests(), so the same checks run.
+
+    Read-only: a single `kubectl get <resources> -o yaml`. Nothing is
+    created, changed or deleted on the cluster. Each object gets
+    __file__ = "live-cluster" (used in findings, never in output).
+
+    Raises ValueError if kubectl is missing, the cluster cannot be
+    reached, or the output is not valid YAML.
+    """
+    if shutil.which(kubectl) is None:
+        raise ValueError(
+            "kubectl not found on PATH — install kubectl and configure a "
+            "cluster (minikube / kind / kubeconfig), or scan manifest "
+            "files instead.")
+    cmd = [kubectl, "get", LIVE_RESOURCES]
+    if namespace:
+        cmd += ["-n", namespace]
+    else:
+        cmd += ["-A"]
+    if context:
+        cmd += ["--context", context]
+    cmd += ["-o", "yaml"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            "kubectl timed out after 120s — is the cluster reachable?")
+    if proc.returncode != 0:
+        raise ValueError("kubectl failed: %s" % (
+            proc.stderr.strip() or "unknown error"))
+    try:
+        docs = list(yaml.load_all(io.StringIO(proc.stdout),
+                                  Loader=StrictLoader))
+    except yaml.YAMLError as exc:
+        raise ValueError(
+            "kubectl output is not valid YAML: %s" % exc) from exc
+    objects, errors = [], []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        items = doc.get("items") if doc.get("kind") == "List" else [doc]
+        for item in items or []:
+            if isinstance(item, dict) and item.get("kind"):
+                item = dict(item)
+                item["__file__"] = "live-cluster"
+                objects.append(item)
     return objects, errors
 
 
@@ -692,15 +757,19 @@ def check_network_policies(inv):
     findings = []
     by_ns = {}
     for obj in inv.workloads:
-        by_ns.setdefault(obj_ns(obj), []).append(obj_name(obj))
+        by_ns.setdefault(obj_ns(obj), []).append(obj)
     np_ns = {obj_ns(p) for p in inv.network_policies}
     for ns in sorted(by_ns):
         if ns not in np_ns:
-            fake = {"kind": "Namespace", "metadata": {"name": ns}}
+            # The finding is about a namespace, not one object — point
+            # it at the first workload in that namespace, so the report
+            # shows where it came from (and live mode tags it live-cluster).
+            fake = {"kind": "Namespace", "metadata": {"name": ns},
+                    "__file__": by_ns[ns][0].get("__file__", "")}
             findings.append(make_finding(
                 "NET-001", fake,
                 "namespace '%s' runs workloads (%s) but has no NetworkPolicy" % (
-                    ns, ", ".join(sorted(by_ns[ns]))),
+                    ns, ", ".join(sorted(obj_name(o) for o in by_ns[ns]))),
                 namespace=ns))
     return findings
 
@@ -773,8 +842,8 @@ def build_text_report(path, inv, findings, score, grade, errors):
                  "run code in any pod, change RBAC itself. Scope roles to exact "
                  "verbs, resources and namespaces instead.")
     lines.append("")
-    lines.append("Lab use only — audit only manifests you own or have written "
-                 "permission to audit.")
+    lines.append("Lab use only — audit only manifests or clusters you own or "
+                 "have written permission to audit.")
     return "\n".join(lines) + "\n"
 
 
@@ -821,35 +890,26 @@ def print_summary(inv, findings, score, grade, quiet=False):
     print()
 
 
-def scan_path(path, args):
-    """Run a full scan. Returns (exit_code, findings, score, grade)."""
-    if yaml is None:
-        err("PyYAML is not installed. Run: python run.py setup")
-        err("  or: pip install pyyaml")
-        return 2, [], 0, "F"
-    # Gobuster-style config block, like SSTIProbe's do_scan().
-    if not args.quiet:
-        header("SCAN")
-        info("Target", path)
-        info("Output", args.output)
-        info("JSON report", args.json or "—")
-        info("Min severity", args.min_severity or "all")
-        checks = args.check or "all 25"
-        if args.skip_check:
-            checks += " (skip %s)" % args.skip_check
-        info("Checks", checks)
-        info("Fail on", args.fail_on or "critical (default)")
-        sep()
-    try:
-        objects, errors = collect_manifests(path)
-    except ValueError as exc:
-        err(str(exc))
-        return 2, [], 0, "F"
-    if not objects and not errors:
-        warn("No Kubernetes manifests found in %s" % path)
-        return 0, [], 100, "A"
-    inv = Inventory(objects)
-    findings = run_all_checks(inv)
+def print_config(target, args):
+    """Gobuster-style config block, like SSTIProbe's do_scan()."""
+    if args.quiet:
+        return
+    header("SCAN")
+    info("Target", target)
+    info("Output", args.output)
+    info("JSON report", args.json or "—")
+    info("Min severity", args.min_severity or "all")
+    checks = args.check or "all 25"
+    if args.skip_check:
+        checks += " (skip %s)" % args.skip_check
+    info("Checks", checks)
+    info("Fail on", args.fail_on or "critical (default)")
+    sep()
+
+
+def finish_scan(target, inv, findings, errors, args):
+    """Filters, summary, reports and exit code — shared by file scans
+    and live-cluster scans. Returns (exit_code, findings, score, grade)."""
     score = score_findings(findings)
     grade = grade_for(score)
 
@@ -868,13 +928,13 @@ def scan_path(path, args):
 
     print_summary(inv, shown, score, grade, quiet=args.quiet)
 
-    report = build_text_report(path, inv, shown, score, grade, errors)
+    report = build_text_report(target, inv, shown, score, grade, errors)
     with open(args.output, "w", encoding="utf-8") as fh:
         fh.write(report)
     ok("Report saved: %s" % args.output)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump(build_json_report(path, inv, shown, score, grade, errors),
+            json.dump(build_json_report(target, inv, shown, score, grade, errors),
                       fh, indent=2)
         ok("JSON report saved: %s" % args.json)
     for e in errors:
@@ -892,6 +952,54 @@ def scan_path(path, args):
         if counts["critical"]:
             return 2, findings, score, grade
     return 1, findings, score, grade
+
+
+def scan_path(path, args):
+    """Run a full scan of a manifest file or folder.
+    Returns (exit_code, findings, score, grade)."""
+    if yaml is None:
+        err("PyYAML is not installed. Run: python run.py setup")
+        err("  or: pip install pyyaml")
+        return 2, [], 0, "F"
+    print_config(path, args)
+    try:
+        objects, errors = collect_manifests(path)
+    except ValueError as exc:
+        err(str(exc))
+        return 2, [], 0, "F"
+    if not objects and not errors:
+        warn("No Kubernetes manifests found in %s" % path)
+        return 0, [], 100, "A"
+    inv = Inventory(objects)
+    findings = run_all_checks(inv)
+    return finish_scan(path, inv, findings, errors, args)
+
+
+def scan_live(args):
+    """Run a full scan of a live cluster via kubectl — the same checks,
+    the same report, only the source differs. Returns the same tuple
+    as scan_path. The report's target is 'live-cluster' (plus namespace
+    when one is given); every finding's file is 'live-cluster'."""
+    if yaml is None:
+        err("PyYAML is not installed. Run: python run.py setup")
+        err("  or: pip install pyyaml")
+        return 2, [], 0, "F"
+    target = "live-cluster"
+    if args.namespace:
+        target += " (namespace %s)" % args.namespace
+    print_config(target, args)
+    try:
+        objects, errors = collect_live(
+            namespace=args.namespace, context=args.context)
+    except ValueError as exc:
+        err(str(exc))
+        return 2, [], 0, "F"
+    if not objects and not errors:
+        warn("No Kubernetes resources found in the live cluster")
+        return 0, [], 100, "A"
+    inv = Inventory(objects)
+    findings = run_all_checks(inv)
+    return finish_scan(target, inv, findings, errors, args)
 
 
 def list_checks():
@@ -923,6 +1031,7 @@ MENU_OPTIONS = [
     (5, "List all checks", "checks"),
     (6, "Run step tests", "test"),
     (7, "Check setup (doctor)", "doctor"),
+    (8, "Scan live cluster (kubectl)", "live"),
     (0, "Exit", None),
 ]
 
@@ -967,6 +1076,24 @@ def doctor():
         ok("Test manifests (clean): %s" % clean)
     else:
         warn("Test manifests (clean) missing: %s" % clean)
+    # Live-cluster mode (v1.1): kubectl is optional — file scans work
+    # without it, so a missing kubectl is a warning, not a failure.
+    kubectl = shutil.which("kubectl")
+    if kubectl:
+        ok("kubectl found: %s" % kubectl)
+        try:
+            proc = subprocess.run(["kubectl", "cluster-info"],
+                                  capture_output=True, text=True, timeout=15)
+        except OSError:
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            ok("Cluster reachable (kubectl cluster-info OK) — live mode ready")
+        else:
+            warn("kubectl found, but no cluster reachable — live mode needs "
+                 "a cluster (minikube / kind / kubeconfig); file scans work")
+    else:
+        warn("kubectl NOT found — live-cluster mode unavailable; "
+             "file scans still work")
     if yaml is None:
         warn("Doctor: something is missing (see [!] lines above).")
         return 1
@@ -1025,8 +1152,14 @@ def menu(args):
                 test_rbaclens.run_all_tests()
             elif choice == "7":
                 doctor()
+            elif choice == "8":
+                args.namespace = ask("ENTER NAMESPACE (Enter = all namespaces)", "")
+                args.context = ask("ENTER KUBECTL CONTEXT (Enter = default)", "")
+                args.output = "rbaclens_live_report.txt"
+                code, _f, _s, _g = scan_live(args)
+                print("Exit code: %d" % code)
             else:
-                err("Please input a number from the menu (0-7).")
+                err("Please input a number from the menu (0-8).")
                 time.sleep(1)
                 continue
         except (EOFError, KeyboardInterrupt):
@@ -1046,9 +1179,15 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="rbaclens",
         description="RBACLens — Kubernetes RBAC and Workload Auditor "
-                    "(files only, no live cluster).")
+                    "(manifest files, or a live cluster with --live).")
     p.add_argument("path", nargs="?", default=None,
                    help="manifest file or folder to audit")
+    p.add_argument("--live", action="store_true",
+                   help="scan a live cluster via kubectl instead of files")
+    p.add_argument("-n", "--namespace", default=None, metavar="NAME",
+                   help="live mode: one namespace only (default: all)")
+    p.add_argument("--context", default=None, metavar="NAME",
+                   help="live mode: kubectl context (default: current)")
     p.add_argument("-o", "--output", default="rbaclens_report.txt",
                    help="text report file (default: rbaclens_report.txt)")
     p.add_argument("--json", default=None, metavar="FILE",
@@ -1091,11 +1230,15 @@ def main(argv=None):
         list_checks()
         return 0
     if args.inventory:
-        if not args.path:
-            err("Give a manifest file or folder for --inventory.")
-            return 2
         try:
-            objects, errors = collect_manifests(args.path)
+            if args.live:
+                objects, errors = collect_live(
+                    namespace=args.namespace, context=args.context)
+            else:
+                if not args.path:
+                    err("Give a manifest file or folder for --inventory.")
+                    return 2
+                objects, errors = collect_manifests(args.path)
         except ValueError as exc:
             err(str(exc))
             return 2
@@ -1104,6 +1247,9 @@ def main(argv=None):
         for e in errors:
             warn("Parse error: %s" % e)
         return 0
+    if args.live:
+        code, _findings, _score, _grade = scan_live(args)
+        return code
     if args.interactive or args.path is None:
         return menu(args)
     code, _findings, _score, _grade = scan_path(args.path, args)

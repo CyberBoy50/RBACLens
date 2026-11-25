@@ -1,8 +1,8 @@
 ================================================================
 RBACLens Report — Kubernetes RBAC and Workload Audit
 ================================================================
-Date: 2026-11-25 18:40:08
-Tool: RBACLens 1.0 (author: CyberBoy50)
+Date: 2026-11-25 20:16:36
+Tool: RBACLens 1.1 (author: CyberBoy50)
 Scanned: /home/hatch/workspace/rbaclens/test_manifests/bad
 
 Inventory: 16 objects (2 Roles, 3 ClusterRoles, 3 RoleBindings, 2 ClusterRoleBindings, 1 ServiceAccounts, 5 workloads, 0 NetworkPolicies)
@@ -163,11 +163,13 @@ Fix:       Pin the image to an exact version tag, e.g. nginx:1.27.4, never lates
 ----------------------------------------------------------------
 [MEDIUM] NET-001 — Namespace has workloads but no NetworkPolicy
 Object:    Namespace/default (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
 Evidence:  namespace 'default' runs workloads (debug-app, ipc-pod, worker) but has no NetworkPolicy
 Fix:       Add a NetworkPolicy for the namespace (a default-deny policy is a good start).
 ----------------------------------------------------------------
 [MEDIUM] NET-001 — Namespace has workloads but no NetworkPolicy
 Object:    Namespace/dev (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
 Evidence:  namespace 'dev' runs workloads (backup, batch) but has no NetworkPolicy
 Fix:       Add a NetworkPolicy for the namespace (a default-deny policy is a good start).
 ----------------------------------------------------------------
@@ -288,4 +290,4 @@ Fix:       Set readOnlyRootFilesystem: true and use an emptyDir volume for any w
 
 Defensive lesson — least privilege in RBAC: give every subject only the permissions it needs, nothing more. A binding to cluster-admin hands over the whole cluster: read every secret, run code in any pod, change RBAC itself. Scope roles to exact verbs, resources and namespaces instead.
 
-Lab use only — audit only manifests you own or have written permission to audit.
+Lab use only — audit only manifests or clusters you own or have written permission to audit.

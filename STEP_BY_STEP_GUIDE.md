@@ -90,3 +90,20 @@ misconfigurations.
 appears with the right severity. Step 7 of the test suite asserts all 24
 rules fire on the bad folder (46 findings), the score is 0 with grade F,
 and the clean folder scores 100 with zero findings.
+
+## Step 8 — Live cluster mode (v1.1, PDF ke baad ka upgrade)
+
+**Write:** the same 25 rules, but the objects come from a live cluster
+instead of files — one read-only `kubectl get` (nothing is written to
+the cluster), parsed by the same StrictLoader, scanned by the same
+checks. Findings are tagged `live-cluster` instead of a file name.
+
+**Run it:** `python run.py live` (all namespaces), `python run.py live
+--namespace kube-system`, or menu option 8. Needs `kubectl` on PATH and
+a working kubeconfig — a local `minikube` / `kind` cluster is enough.
+`python run.py doctor` reports whether kubectl and a cluster are there.
+
+**Test:** step 8 of the test suite runs the live path against a fake
+`kubectl` that prints the bad test manifests as a `kind: List` dump —
+same 16 objects, same 46 findings, score 0/100. A missing kubectl and a
+failing kubectl both raise a loud error instead of scanning nothing.

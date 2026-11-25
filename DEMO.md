@@ -3,6 +3,11 @@
 Run on 25 November 2026, against the test manifests in `test_manifests/`
 (planted flaws only — no real cluster, no real repository).
 
+**v1.1 note:** the same scan now also runs live — `python run.py live`
+audits your own cluster through one read-only `kubectl get`, with the
+exact same 25 rules. Tested with a fake `kubectl` (step 8): same 16
+objects, same 46 findings, score 0/100.
+
 ## 1. The bad folder — everything planted is found
 
 ```bash

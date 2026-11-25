@@ -4,8 +4,9 @@
 Usage:
     python run.py setup        # create venv + install dependencies (first time)
     python run.py scan <path>  # audit a manifest file or folder
-    python run.py test         # run the 7 build-plan step tests
-    python run.py doctor       # check the setup
+    python run.py live [--namespace NAME]  # audit a live cluster via kubectl
+    python run.py test         # run the 7 build-plan step tests (+ live test)
+    python run.py doctor       # check the setup (incl. kubectl / cluster)
     python run.py checks       # list all checks
     python run.py inventory <path>  # show the RBAC inventory
 
@@ -65,6 +66,11 @@ def cmd_scan(args):
     return run([vp, target] + args).returncode
 
 
+def cmd_live(args):
+    # Live cluster audit — read-only kubectl get, same checks as files.
+    return cmd_scan(["--live"] + args)
+
+
 def cmd_test(_args):
     vp = venv_python() or sys.executable
     return run([vp, os.path.join(HERE, "test_rbaclens.py")]).returncode
@@ -85,6 +91,10 @@ def cmd_doctor(_args):
     clean = os.path.join(HERE, "test_manifests", "clean")
     print("[%s] test manifests (bad): %s" % ("+" if os.path.isdir(bad) else "!", bad))
     print("[%s] test manifests (clean): %s" % ("+" if os.path.isdir(clean) else "!", clean))
+    import shutil
+    kubectl = shutil.which("kubectl")
+    print("[%s] kubectl: %s" % ("+" if kubectl else "!",
+                                kubectl or "not found — live mode unavailable"))
     print("-" * 40)
     problems = (vp is None)
     try:
@@ -107,6 +117,8 @@ def main():
         return cmd_setup(args)
     if cmd == "scan":
         return cmd_scan(args)
+    if cmd == "live":
+        return cmd_live(args)
     if cmd == "test":
         return cmd_test(args)
     if cmd == "doctor":
