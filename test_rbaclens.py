@@ -161,6 +161,16 @@ def step6():
         check("report has findings section", "Findings:" in text)
     bad_text = open(os.path.join(HERE, "report_bad.txt"), encoding="utf-8").read()
     check("bad report lists cluster-admin", "RBAC-001" in bad_text)
+    check("bad report carries the disclaimer",
+          "DISCLAIMER — AUTHORIZED USE ONLY" in bad_text
+          and "PECA 2016" in bad_text)
+    import json as _json
+    bad_json = _json.load(open(os.path.join(HERE, "report_bad.json"),
+                               encoding="utf-8"))
+    check("bad JSON report carries the disclaimer field",
+          bad_json.get("disclaimer", "").startswith(
+              "DISCLAIMER — AUTHORIZED USE ONLY")
+          and "PECA 2016" in bad_json.get("disclaimer", ""))
     clean_text = open(os.path.join(HERE, "report_clean.txt"), encoding="utf-8").read()
     check("clean report has no findings", "No findings." in clean_text)
 

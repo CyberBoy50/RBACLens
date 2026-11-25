@@ -4,13 +4,22 @@ A command-line tool, written in Python, that reads a folder of Kubernetes
 YAML manifests and finds the permissions and workload settings attackers
 abuse — then grades the whole folder with a score and a letter grade.
 
-**Version:** 1.2
+**Version:** 1.3
 **Author:** CyberBoy50
 
 > Lab use only. Audit only manifests or clusters you own or have written
 > permission to audit. File scans need no credentials and no network; live
 > mode (v1.1) reads your own cluster through kubectl — read-only, nothing
 > is written to the cluster.
+
+## Legal — authorized use only
+
+> DISCLAIMER — AUTHORIZED USE ONLY. This tool was built for ethical,
+> authorized security testing only. You are using it on your own
+> responsibility. The authors are not responsible for how you use it, or
+> for anything that happens because of your use. Only test systems, code,
+> and data you own or have explicit written permission to test — testing
+> anything else may be illegal (for example, PECA 2016 in Pakistan).
 
 ## What it finds
 

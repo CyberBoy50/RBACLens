@@ -14,7 +14,7 @@ via kubectl (read-only `kubectl get`, nothing is written to the cluster).
 Point it at your own manifests or your own cluster, never at a cluster
 or a repository you do not own.
 
-Version: 1.2
+Version: 1.3
 """
 import argparse
 import io
@@ -24,11 +24,20 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from datetime import datetime
 
-VERSION = "1.2"
+VERSION = "1.3"
 AUTHOR = "CyberBoy50"
+
+DISCLAIMER = ("DISCLAIMER — AUTHORIZED USE ONLY. This tool was built for "
+              "ethical, authorized security testing only. You are using it "
+              "on your own responsibility. The authors are not responsible "
+              "for how you use it, or for anything that happens because of "
+              "your use. Only test systems, code, and data you own or have "
+              "explicit written permission to test — testing anything else "
+              "may be illegal (for example, PECA 2016 in Pakistan).")
 
 try:
     import yaml
@@ -143,6 +152,9 @@ def banner():
     print("┌" + "─" * 50 + "┐")
     print("│" + ("RBACLens v" + VERSION + " — files + live cluster (kubectl)").center(50) + "│")
     print("│" + "For authorized use only".center(50) + "│")
+    print("│" + "─" * 50 + "│")
+    for line in textwrap.wrap(DISCLAIMER, 48):
+        print("│" + line.center(50) + "│")
     print("└" + "─" * 50 + "┘")
     print(f"{C.RST}", end="")
     print()
@@ -835,6 +847,8 @@ def build_text_report(path, inv, findings, score, grade, errors):
     lines.append("Tool: RBACLens %s (author: %s)" % (VERSION, AUTHOR))
     lines.append("Scanned: %s" % path)
     lines.append("")
+    lines.extend(textwrap.wrap(DISCLAIMER, 64))
+    lines.append("")
     lines.append("Inventory: %d objects (%d Roles, %d ClusterRoles, "
                  "%d RoleBindings, %d ClusterRoleBindings, %d ServiceAccounts, "
                  "%d workloads, %d NetworkPolicies)" % (
@@ -882,6 +896,7 @@ def build_json_report(path, inv, findings, score, grade, errors):
         "tool": "RBACLens",
         "version": VERSION,
         "author": AUTHOR,
+        "disclaimer": DISCLAIMER,
         "scanned_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "path": path,
         "inventory": inv.counts(),
