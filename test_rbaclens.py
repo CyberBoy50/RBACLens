@@ -10,11 +10,16 @@ Step 6 — CLI arguments and report (two folders, both reports complete)
 Step 7 — full run on a test folder (every planted flaw in the report)
 Step 8 — live-cluster mode (v1.1): a fake kubectl prints the bad
 manifests as a kind: List dump; collect_live() must find the same
-16 objects and 57 findings, and missing/failing kubectl must fail
+21 objects and 62 findings, and missing/failing kubectl must fail
 loudly instead of scanning nothing.
 Step 9 — Pod Security Standards (v1.2): PSS-001/002/003 on synthetic
 workloads — seccomp missing/wrong type, drop ALL missing, NET_BIND_SERVICE
 allowed, no double-count with WL-010.
+Step 10 — Zero-limits (v1.4): cloud IAM rules (IRSA / GKE / Azure
+annotations, over-broad roles, deprecated pod-identity), image CVE
+lookup via NVD (stub fetcher + a best-effort live check), RBAC-010
+aggregation expansion, Kyverno + Gatekeeper admission output, --fix-out
+remediation, and the empty-folder false-clean guard.
 
 Run:  python run.py test        or        python test_rbaclens.py
 """
@@ -56,7 +61,7 @@ def step1():
         os.path.join(BAD, "rbac-bad.yaml"))
     check("no parse errors", not errors)
     kinds = sorted({o.get("kind") for o in objects})
-    check("every object parsed", len(objects) == 10, "(%d objects)" % len(objects))
+    check("every object parsed", len(objects) == 11, "(%d objects)" % len(objects))
     check("kinds seen", kinds == ["ClusterRole", "ClusterRoleBinding",
                                   "Role", "RoleBinding"],
           "(%s)" % ", ".join(kinds))
@@ -69,12 +74,12 @@ def step2():
     inv, _ = scan(BAD)
     c = inv.counts()
     check("roles", c["roles"] == 2, "(%d)" % c["roles"])
-    check("cluster_roles", c["cluster_roles"] == 3, "(%d)" % c["cluster_roles"])
+    check("cluster_roles", c["cluster_roles"] == 4, "(%d)" % c["cluster_roles"])
     check("role_bindings", c["role_bindings"] == 3, "(%d)" % c["role_bindings"])
     check("cluster_role_bindings", c["cluster_role_bindings"] == 2,
           "(%d)" % c["cluster_role_bindings"])
-    check("service_accounts", c["service_accounts"] == 1, "(%d)" % c["service_accounts"])
-    check("workloads", c["workloads"] == 5, "(%d)" % c["workloads"])
+    check("service_accounts", c["service_accounts"] == 4, "(%d)" % c["service_accounts"])
+    check("workloads", c["workloads"] == 6, "(%d)" % c["workloads"])
     check("network_policies", c["network_policies"] == 0, "(%d)" % c["network_policies"])
     # kind: List was flattened (the ipc-pod inside mixed.yaml counts)
     names = {rbaclens.obj_name(o) for o in inv.objects}
@@ -184,16 +189,17 @@ def step7():
                 "WL-001", "WL-002", "WL-003", "WL-004", "WL-005", "WL-006",
                 "WL-007", "WL-008", "WL-009", "WL-010", "WL-011",
                 "IMG-001", "IMG-002", "NET-001",
-                "PSS-001", "PSS-002", "PSS-003"}
+                "PSS-001", "PSS-002", "PSS-003",
+                "IAM-001", "IAM-002", "IAM-003"}
     missing = expected - rules
     check("every planted flaw in the report", not missing,
           ("(missing: %s)" % ", ".join(sorted(missing))) if missing else
           "(%d findings, %d rules)" % (len(findings), len(rules)))
     counts = rbaclens.summary_counts(findings)
-    check("bad folder: 57 findings", len(findings) == 57,
+    check("bad folder: 62 findings", len(findings) == 62,
           "(%d)" % len(findings))
-    check("bad folder: 7 critical, 23 high, 16 medium, 11 low",
-          counts == {"critical": 7, "high": 23, "medium": 16, "low": 11},
+    check("bad folder: 8 critical, 23 high, 20 medium, 11 low",
+          counts == {"critical": 8, "high": 23, "medium": 20, "low": 11},
           "(%s)" % counts)
     score = rbaclens.score_findings(findings)
     check("score is low for a bad folder", score < 60, "(score %d)" % score)
@@ -209,7 +215,8 @@ def step8():
     # Assemble a kind: List dump from the bad manifests, the way
     # `kubectl get ... -o yaml` returns them.
     items = []
-    for name in ("rbac-bad.yaml", "workload-bad.yaml", "mixed.yaml"):
+    for name in ("rbac-bad.yaml", "workload-bad.yaml", "mixed.yaml",
+                 "cloud-bad.yaml"):
         with open(os.path.join(BAD, name), encoding="utf-8") as fh:
             for doc in yaml.safe_load_all(fh):
                 if not isinstance(doc, dict):
@@ -231,13 +238,18 @@ def step8():
     try:
         os.environ["PATH"] = tmpdir + os.pathsep + old_path
         objects, errors = rbaclens.collect_live()
-        check("fake kubectl returns 16 objects", len(objects) == 16,
+        check("fake kubectl returns 21 objects", len(objects) == 21,
               "(%d)" % len(objects))
         check("no parse errors", not errors)
         inv = rbaclens.Inventory(objects)
         findings = rbaclens.run_all_checks(inv)
-        check("live scan finds 57 findings", len(findings) == 57,
+        check("live scan finds 62 findings", len(findings) == 62,
               "(%d)" % len(findings))
+        check("live scan finds the IAM rules",
+              {"IAM-001", "IAM-002", "IAM-003"} <=
+              {f["rule"] for f in findings})
+        check("live mode fetches ReplicaSets (v1.4)",
+              "replicasets" in rbaclens.LIVE_RESOURCES)
         check("live scan finds the PSS rules",
               {"PSS-001", "PSS-002", "PSS-003"} <=
               {f["rule"] for f in findings})
@@ -358,10 +370,319 @@ def step9():
               if x["rule"] == "PSS-003"])
 
 
+def _sa(name, annotations):
+    """A ServiceAccount carrying cloud-identity annotations."""
+    return {"apiVersion": "v1", "kind": "ServiceAccount",
+            "metadata": {"name": name, "namespace": "default",
+                         "annotations": annotations},
+            "__file__": "synthetic"}
+
+
+def _iam(obj):
+    inv = rbaclens.Inventory([obj] if isinstance(obj, dict) else obj)
+    return rbaclens.check_cloud_iam(inv)
+
+
+def _nvd_vuln(cve_id, score):
+    return {"cve": {"id": cve_id,
+                    "metrics": {"cvssMetricV31": [
+                        {"cvssData": {"baseScore": score}}]}}}
+
+
+def step10():
+    print("Step 10 — Zero-limits (v1.4): IAM, CVE, admission, fix")
+    import json as _json
+    import yaml as _yaml
+
+    # --- Cloud IAM on the fixtures -------------------------------------
+    _inv, findings = scan(BAD)
+    iam1 = [f for f in findings if f["rule"] == "IAM-001"]
+    check("IAM-001 fires 3 times (IRSA + GKE + pod-identity)",
+          len(iam1) == 3, "(%d)" % len(iam1))
+    iam2 = [f for f in findings if f["rule"] == "IAM-002"]
+    check("IAM-002 fires once, critical, names AdministratorAccess",
+          len(iam2) == 1 and iam2[0]["severity"] == "critical"
+          and "AdministratorAccess" in iam2[0]["evidence"])
+    iam3 = [f for f in findings if f["rule"] == "IAM-003"]
+    check("IAM-003 fires once, names the deprecated annotation",
+          len(iam3) == 1 and "aadpodidentity" in iam3[0]["evidence"])
+    check("GKE identity fires IAM-001 but not IAM-002",
+          any("gke-app" in f["object"] for f in iam1)
+          and not [f for f in iam2 if "gke-app" in f["object"]])
+    _inv2, findings2 = scan(CLEAN)
+    check("clean folder: no IAM findings",
+          not [f for f in findings2 if f["rule"].startswith("IAM-")])
+
+    # --- Cloud IAM, synthetic ------------------------------------------
+    scoped = _sa("scoped", {"eks.amazonaws.com/role-arn":
+                            "arn:aws:iam::123456789012:role/app-reader"})
+    f = _iam(scoped)
+    check("scoped IRSA role: IAM-001 only, no IAM-002",
+          any(x["rule"] == "IAM-001" for x in f)
+          and not [x for x in f if x["rule"] == "IAM-002"])
+    wild = _sa("wild", {"eks.amazonaws.com/role-arn":
+                        "arn:aws:iam::123456789012:role/*"})
+    f = _iam(wild)
+    check("wildcard role ARN fires IAM-002",
+          any(x["rule"] == "IAM-002" and "wildcard" in x["evidence"]
+              for x in f))
+    azure = _sa("az", {"azure.workload.identity/client-id":
+                       "11111111-2222-3333-4444-555555555555"})
+    f = _iam(azure)
+    check("Azure Workload Identity fires IAM-001 only",
+          any(x["rule"] == "IAM-001" for x in f)
+          and not [x for x in f if x["rule"] in ("IAM-002", "IAM-003")])
+    # Pod-template annotation (some setups annotate the pod, not the SA).
+    dep = {"apiVersion": "apps/v1", "kind": "Deployment",
+           "metadata": {"name": "annotated", "namespace": "default"},
+           "spec": {"template": {
+               "metadata": {"annotations": {
+                   "eks.amazonaws.com/role-arn":
+                       "arn:aws:iam::123456789012:role/app-reader"}},
+               "spec": {"containers": [{"name": "app", "image": "nginx:1.27.4"}]}}},
+           "__file__": "synthetic"}
+    f = _iam(dep)
+    check("pod-template IRSA annotation fires IAM-001",
+          any(x["rule"] == "IAM-001" for x in f))
+
+    # --- CVE lookup, stub fetcher --------------------------------------
+    def _pod_with_image(image):
+        pod = _pod("cve-test",
+                   pod_sc={"seccompProfile": {"type": "RuntimeDefault"}},
+                   containers=[_ctr("main", {"capabilities": {
+                       "drop": ["ALL"]}})])
+        pod["spec"]["containers"][0]["image"] = image
+        return pod
+
+    def stub_critical(_part, _vendor, _product, _version):
+        return {"vulnerabilities": [_nvd_vuln("CVE-2022-31144", 9.8),
+                                    _nvd_vuln("CVE-2022-35951", 5.5)]}
+
+    inv = rbaclens.Inventory([_pod_with_image("redis:7.0.0")])
+    f, status = rbaclens.check_cve(inv, fetcher=stub_critical)
+    check("CVE-001 fires for a vulnerable image",
+          len(f) == 1 and f[0]["rule"] == "CVE-001")
+    check("CVE-001 with CVSS 9.8 is critical",
+          f[0]["severity"] == "critical")
+    check("CVE-001 evidence lists the CVE IDs",
+          "CVE-2022-31144" in f[0]["evidence"]
+          and "CVE-2022-35951" in f[0]["evidence"])
+    check("CVE status records 2 CVEs for the image",
+          status["images"]["redis:7.0.0"]["cves"] == 2)
+
+    def stub_medium(_part, _vendor, _product, _version):
+        return {"vulnerabilities": [_nvd_vuln("CVE-2021-12345", 5.0)]}
+
+    inv = rbaclens.Inventory([_pod_with_image("redis:7.0.0")])
+    f, _s = rbaclens.check_cve(inv, fetcher=stub_medium)
+    check("CVE-001 with CVSS 5.0 stays high",
+          len(f) == 1 and f[0]["severity"] == "high")
+
+    def stub_clean(_part, _vendor, _product, _version):
+        return {"vulnerabilities": []}
+
+    inv = rbaclens.Inventory([_pod_with_image("redis:7.0.0")])
+    f, status = rbaclens.check_cve(inv, fetcher=stub_clean)
+    check("no CVEs: no finding, image marked checked",
+          not f and status["images"]["redis:7.0.0"]["status"] == "checked")
+
+    def stub_down(_part, _vendor, _product, _version):
+        raise ValueError("NVD API unreachable: simulated outage")
+
+    inv = rbaclens.Inventory([_pod_with_image("redis:7.0.0")])
+    f, status = rbaclens.check_cve(inv, fetcher=stub_down)
+    check("NVD down: no findings, no crash, state offline",
+          not f and status["state"] == "offline")
+    check("NVD down: image marked error, never clean",
+          status["images"]["redis:7.0.0"]["status"] == "error")
+
+    def stub_must_not_run(_part, _vendor, _product, _version):
+        raise AssertionError("fetcher must not be called for this image")
+
+    inv = rbaclens.Inventory([_pod_with_image("mycorp/custom-app:1.2.3")])
+    f, status = rbaclens.check_cve(inv, fetcher=stub_must_not_run)
+    check("unmapped image: skipped, fetcher never called",
+          not f and status["images"]["mycorp/custom-app:1.2.3"]["status"]
+          == "skipped")
+    inv = rbaclens.Inventory([_pod_with_image("redis:7")])
+    f, status = rbaclens.check_cve(inv, fetcher=stub_must_not_run)
+    check("imprecise tag (redis:7): skipped, fetcher never called",
+          not f and status["images"]["redis:7"]["status"] == "skipped"
+          and "exact version" in status["images"]["redis:7"]["reason"])
+    check("version parsing: 1.27.4-alpine -> 1.27.4",
+          rbaclens._precise_version("1.27.4-alpine") == "1.27.4")
+    check("version parsing: latest/7/3.19 -> None",
+          rbaclens._precise_version("latest") is None
+          and rbaclens._precise_version("7") is None
+          and rbaclens._precise_version("3.19") is None)
+
+    # --- CVE lookup, live NVD (best effort: offline must not fail) -----
+    try:
+        data = rbaclens.nvd_query_cpe("a", "redis", "redis", "7.0.0",
+                                      timeout=15)
+        total = data.get("totalResults", 0)
+        check("live NVD: redis 7.0.0 returns real CVE data",
+              total > 0, "(totalResults=%d)" % total)
+    except ValueError as exc:
+        print("    (live NVD check skipped — offline: %s)" % exc)
+        check("live NVD skipped cleanly while offline", True)
+
+    # --- CVE flag end to end (CLI, clean folder) -----------------------
+    py = sys.executable
+    out = os.path.join(HERE, "report_cve.txt")
+    proc = subprocess.run(
+        [py, os.path.join(HERE, "rbaclens.py"), CLEAN, "-o", out,
+         "--cve", "-q"],
+        capture_output=True, text=True)
+    check("CLI --cve runs on the clean folder (exit 0)",
+          proc.returncode == 0, "(exit %d)" % proc.returncode)
+    cve_text = open(out, encoding="utf-8").read()
+    check("CLI --cve report records the CVE check",
+          "CVE check (--cve):" in cve_text)
+    if os.path.isfile(out):
+        os.remove(out)
+
+    # --- RBAC-010 aggregation expansion --------------------------------
+    rbac10 = [f for f in findings if f["rule"] == "RBAC-010"]
+    check("RBAC-010 names the aggregated role (view-extra)",
+          len(rbac10) == 1 and "view-extra" in rbac10[0]["evidence"])
+    check("RBAC-010 stays low for a benign aggregate",
+          rbac10[0]["severity"] == "low")
+
+    def _cluster_role(name, labels, rules):
+        return {"apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {"name": name, "labels": labels},
+                "rules": rules, "__file__": "synthetic"}
+
+    agg = _cluster_role("agg", {}, [])
+    agg["aggregationRule"] = {"clusterRoleSelectors": [
+        {"matchLabels": {"team": "x"}}]}
+    wild_role = _cluster_role("wild-x", {"team": "x"},
+                              [{"verbs": ["*"], "resources": ["*"],
+                                "apiGroups": ["*"]}])
+    inv = rbaclens.Inventory([agg, wild_role])
+    f = [x for x in rbaclens.check_rbac(inv) if x["rule"] == "RBAC-010"]
+    check("aggregated wildcard role escalates RBAC-010 to high",
+          len(f) == 1 and f[0]["severity"] == "high"
+          and "wild-x" in f[0]["evidence"])
+    inv = rbaclens.Inventory([agg])
+    f = [x for x in rbaclens.check_rbac(inv) if x["rule"] == "RBAC-010"]
+    check("no matching role: RBAC-010 says so, stays low",
+          len(f) == 1 and f[0]["severity"] == "low"
+          and "no ClusterRole" in f[0]["evidence"])
+
+    # --- Admission output ----------------------------------------------
+    kyverno = rbaclens.build_kyverno_policy(findings)
+    policy = _yaml.safe_load(kyverno)
+    check("Kyverno policy parses, kind ClusterPolicy",
+          policy.get("kind") == "ClusterPolicy"
+          and policy["metadata"]["name"] == "rbaclens-enforce")
+    check("Kyverno policy enforces (blocks, not audits)",
+          policy["spec"]["validationFailureAction"] == "Enforce")
+    rule_names = {r["name"] for r in policy["spec"]["rules"]}
+    check("Kyverno policy blocks privileged containers",
+          "block-privileged-containers" in rule_names)
+    check("Kyverno policy blocks cluster-admin bindings",
+          "block-cluster-admin-bindings" in rule_names)
+    check("Kyverno policy covers the flagged categories only",
+          "block-hostpath-volumes" in rule_names)
+    gatekeeper = rbaclens.build_gatekeeper_bundle(findings)
+    docs = list(_yaml.safe_load_all(gatekeeper))
+    kinds = {(d.get("kind")) for d in docs}
+    check("Gatekeeper bundle has templates + constraints",
+          kinds >= {"ConstraintTemplate", "RBACLensWorkload",
+                    "RBACLensBinding"})
+    check("Gatekeeper Rego blocks privileged containers",
+          "privileged" in gatekeeper and "WL-001" in gatekeeper)
+    check("Gatekeeper Rego blocks cluster-admin bindings",
+          "cluster-admin" in gatekeeper and "RBAC-001" in gatekeeper)
+    clean_policy = rbaclens.build_kyverno_policy(findings2)
+    clean_names = {r["name"] for r in
+                   _yaml.safe_load(clean_policy)["spec"]["rules"]}
+    check("clean scan: admission output is the full baseline",
+          "block-privileged-containers" in clean_names
+          and "block-cluster-admin-bindings" in clean_names)
+    cats = rbaclens.admission_categories_for(
+        [f for f in findings if f["rule"] == "WL-001"])
+    check("one WL-001 finding -> only the privileged category",
+          cats == {"privileged"})
+
+    # --- --fix-out ------------------------------------------------------
+    objects, _errs = rbaclens.collect_manifests(BAD)
+    tmpdir = tempfile.mkdtemp(prefix="rbaclens-fix-")
+    try:
+        written, applied_n, manual_n = rbaclens.write_fix_output(
+            objects, findings, tmpdir)
+        check("fix output writes the changed files",
+              written >= 1 and os.path.isfile(
+                  os.path.join(tmpdir, "workload-bad.yaml")))
+        fixes = open(os.path.join(tmpdir, "FIXES.md"),
+                     encoding="utf-8").read()
+        check("FIXES.md lists manual items (RBAC-001, hostPath)",
+              "RBAC-001" in fixes and "WL-006" in fixes)
+        check("fix output applied real fixes", applied_n > 10,
+              "(%d)" % applied_n)
+        fixed_docs = list(_yaml.safe_load_all(
+            open(os.path.join(tmpdir, "workload-bad.yaml"),
+                 encoding="utf-8")))
+        debug = [d for d in fixed_docs
+                 if (d.get("metadata") or {}).get("name") == "debug-app"][0]
+        spec = debug["spec"]["template"]["spec"]
+        ctr = spec["containers"][0]
+        check("fixed debug-app: privileged removed",
+              ctr["securityContext"]["privileged"] is False)
+        check("fixed debug-app: hostNetwork/hostPID removed",
+              spec["hostNetwork"] is False and spec["hostPID"] is False)
+        check("fixed debug-app: runAsNonRoot + drop ALL + limits",
+              ctr["securityContext"]["runAsNonRoot"] is True
+              and "ALL" in ctr["securityContext"]["capabilities"]["drop"]
+              and ctr["resources"]["limits"]["cpu"] == "500m")
+        # Re-scan the fixed file: the mechanical workload flaws are gone,
+        # the hostPath (needs a human) is still flagged.
+        fixed_inv = rbaclens.Inventory(fixed_docs)
+        fixed_wl = {f["rule"] for f in
+                    rbaclens.check_workloads(fixed_inv)}
+        check("re-scan of fixed file: WL-001/002/003/004/007/008 gone",
+              not ({"WL-001", "WL-002", "WL-003", "WL-004", "WL-007",
+                    "WL-008"} & fixed_wl))
+        check("re-scan of fixed file: hostPath still flagged (manual)",
+              "WL-006" in fixed_wl)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    bad_text = open(os.path.join(BAD, "workload-bad.yaml"),
+                    encoding="utf-8").read()
+    check("original manifests untouched by --fix-out",
+          "privileged: true" in bad_text)
+
+    # --- Empty-folder false-clean guard ---------------------------------
+    empty = tempfile.mkdtemp(prefix="rbaclens-empty-")
+    try:
+        proc = subprocess.run(
+            [py, os.path.join(HERE, "rbaclens.py"), empty, "-o",
+             os.path.join(empty, "r.txt"), "-q"],
+            capture_output=True, text=True)
+        check("empty folder: exit 2, not a clean 100/A",
+              proc.returncode == 2, "(exit %d)" % proc.returncode)
+        check("empty folder: no report written",
+              not os.path.isfile(os.path.join(empty, "r.txt")))
+        fake_inv = rbaclens.Inventory([{
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "cfg", "namespace": "default"},
+            "__file__": "synthetic"}])
+        text = rbaclens.build_text_report(
+            "synthetic", fake_inv, [], 100, "A", [])
+        check("objects-but-nothing-auditable: report warns",
+              "WARNING: inventory contains no roles" in text)
+    finally:
+        shutil.rmtree(empty, ignore_errors=True)
+
+
 def run_all_tests():
     print("RBACLens step tests")
     print("=" * 50)
-    for step in (step1, step2, step3, step4, step5, step6, step7, step8, step9):
+    for step in (step1, step2, step3, step4, step5, step6, step7, step8, step9,
+                 step10):
         step()
         print()
     print("=" * 50)

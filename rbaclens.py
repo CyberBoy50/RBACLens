@@ -7,16 +7,23 @@ YAML manifests and finds the permissions and workload settings attackers
 abuse: cluster-admin bindings, wildcard verbs/resources, privileged
 containers, hostPath volumes, host networking, missing runAsNonRoot,
 missing resource limits, service-account tokens, image tags and digests,
-and missing NetworkPolicies.
+missing NetworkPolicies, cloud workload-identity annotations, and —
+with --cve — known CVEs in the images themselves (NVD lookup).
 
 It works on FILES — a folder of manifests — or LIVE on your own cluster
 via kubectl (read-only `kubectl get`, nothing is written to the cluster).
 Point it at your own manifests or your own cluster, never at a cluster
 or a repository you do not own.
 
-Version: 1.3
+It also enforces, not just audits: --admission-out writes Kyverno
+policies and --gatekeeper-out writes OPA Gatekeeper constraints that
+block the flagged patterns, and --fix-out writes corrected copies of
+the manifests with the safe fixes applied.
+
+Version: 1.4
 """
 import argparse
+import copy
 import io
 import json
 import os
@@ -26,9 +33,12 @@ import subprocess
 import sys
 import textwrap
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 
-VERSION = "1.3"
+VERSION = "1.4"
 AUTHOR = "CyberBoy50"
 
 DISCLAIMER = ("DISCLAIMER — AUTHORIZED USE ONLY. This tool was built for "
@@ -222,6 +232,14 @@ RULES = {
                  "Add capabilities.drop: [ALL] to the container."),
     "PSS-003": ("Pod Security Standards: capability added other than NET_BIND_SERVICE", "high",
                  "Remove the added capabilities; the restricted profile allows only NET_BIND_SERVICE."),
+    "IAM-001": ("ServiceAccount is bound to a cloud workload identity", "medium",
+                 "Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more."),
+    "IAM-002": ("Cloud workload identity references an over-broad cloud role", "critical",
+                 "Replace the over-broad cloud role (AdministratorAccess, Owner/Editor/Contributor, or a wildcard role) with a narrowly scoped role that lists only the permissions the workload needs."),
+    "IAM-003": ("Deprecated cloud pod-identity annotation in use", "medium",
+                 "Migrate from the deprecated Azure pod-identity annotation (aadpodidentity) to Azure Workload Identity (azure.workload.identity/client-id); pod-identity is retired and no longer receives security fixes."),
+    "CVE-001": ("Container image has known CVEs (NVD lookup)", "high",
+                 "Upgrade the image to a patched version (check the CVE IDs in the evidence), or replace it. Pin the new version by digest."),
 }
 
 DANGEROUS_CAPABILITIES = {
@@ -232,6 +250,29 @@ BUILTIN_ROLES = {"cluster-admin", "admin", "edit", "view"}
 WORKLOAD_KINDS = {
     "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet",
     "Job", "CronJob", "Pod", "ReplicationController",
+}
+
+# Cloud workload-identity annotations, by provider. A ServiceAccount (or
+# a pod template) carrying one of these hands the pod a cloud identity:
+# whatever the cloud role can do, the pod can do too.
+CLOUD_IDENTITY_ANNOTATIONS = {
+    # AWS EKS — IAM Roles for Service Accounts (IRSA)
+    "eks.amazonaws.com/role-arn": "AWS EKS IRSA",
+    # Google GKE — Workload Identity
+    "iam.gke.io/gcp-service-account": "GKE Workload Identity",
+    # Azure — Workload Identity (current mechanism)
+    "azure.workload.identity/client-id": "Azure Workload Identity",
+}
+# Retired mechanism: Azure AD Pod Identity (aadpodidentity). No longer
+# receiving security fixes — IAM-003 flags it separately.
+DEPRECATED_IDENTITY_ANNOTATIONS = {
+    "aadpodidentity.k8s.io/identity": "Azure AD Pod Identity (deprecated)",
+}
+# Cloud role names that are over-broad by definition: a pod holding one
+# of these is effectively an administrator of the cloud account/project.
+BROAD_CLOUD_ROLES = {
+    "administratoraccess", "admin", "administrator", "superadmin",
+    "owner", "editor", "contributor",
 }
 
 
@@ -347,7 +388,7 @@ def collect_manifests(path):
 LIVE_RESOURCES = (
     "roles,clusterroles,rolebindings,clusterrolebindings,"
     "serviceaccounts,deployments,daemonsets,statefulsets,"
-    "jobs,cronjobs,pods,networkpolicies"
+    "replicasets,jobs,cronjobs,pods,networkpolicies"
 )
 
 
@@ -519,6 +560,35 @@ def subject_label(subject, binding_ns):
     return "%s/%s%s" % (kind, name, (" (" + ns + ")") if ns else "")
 
 
+def expand_aggregation(role, inv):
+    """Expand an aggregated ClusterRole's selectors (v1.4).
+
+    Returns (matched_roles, note). Only matchLabels selectors are
+    expanded — matchExpressions selectors are reported in the note so
+    the audit never silently claims a full expansion it did not do.
+    """
+    selectors = (role.get("aggregationRule") or {}).get(
+        "clusterRoleSelectors") or []
+    matched, expr_note = [], False
+    for sel in selectors:
+        if sel.get("matchExpressions"):
+            expr_note = True
+        labels = sel.get("matchLabels") or {}
+        if not labels:
+            continue
+        for other in inv.cluster_roles.values():
+            if other is role:
+                continue
+            other_labels = (other.get("metadata") or {}).get("labels") or {}
+            if all(other_labels.get(k) == v for k, v in labels.items()):
+                if other not in matched:
+                    matched.append(other)
+    note = ""
+    if expr_note:
+        note = "matchExpressions selectors are not expanded — review them manually"
+    return matched, note
+
+
 # ---------------------------------------------------------------- RBAC checks
 def check_rbac(inv):
     findings = []
@@ -572,11 +642,37 @@ def check_rbac(inv):
     # Rules inside Roles and ClusterRoles
     for role in list(inv.roles.values()) + list(inv.cluster_roles.values()):
         if role.get("aggregationRule"):
-            findings.append(make_finding(
-                "RBAC-010", role,
-                "ClusterRole uses aggregationRule with selector %s — "
-                "its effective rules expand at runtime" % (
-                    (role.get("aggregationRule") or {}).get("clusterRoleSelectors"),)))
+            matched, expr_note = expand_aggregation(role, inv)
+            evidence = ("ClusterRole uses aggregationRule with selector %s — "
+                        "its effective rules expand at runtime" % (
+                            (role.get("aggregationRule") or {}).get("clusterRoleSelectors"),))
+            if matched:
+                evidence += " — aggregates %d role(s): %s" % (
+                    len(matched),
+                    ", ".join("ClusterRole/%s" % obj_name(m) for m in matched))
+            else:
+                evidence += " — no ClusterRole in these manifests matches the selector"
+            if expr_note:
+                evidence += " (%s)" % expr_note
+            f = make_finding("RBAC-010", role, evidence)
+            # If an aggregated role brings in wildcard verbs/resources or
+            # dangerous verbs, the aggregate is as dangerous as its parts:
+            # escalate the finding instead of under-reporting it (v1.4).
+            bad_parts = []
+            for m in matched:
+                for rule in m.get("rules") or []:
+                    verbs = rule.get("verbs") or []
+                    resources = rule.get("resources") or []
+                    if "*" in verbs or "*" in resources or \
+                            set(verbs) & {"escalate", "bind", "impersonate"}:
+                        bad_parts.append("%s: verbs=%s resources=%s" % (
+                            obj_name(m), verbs, resources))
+            if bad_parts:
+                f["severity"] = "high"
+                f["points"] = SEVERITY_POINTS["high"]
+                f["evidence"] += " — aggregated rules include: %s" % (
+                    "; ".join(bad_parts))
+            findings.append(f)
         for idx, rule in enumerate(role.get("rules") or [], start=1):
             verbs = rule.get("verbs") or []
             resources = rule.get("resources") or []
@@ -816,8 +912,329 @@ def check_network_policies(inv):
     return findings
 
 
-def run_all_checks(inv):
-    findings = check_rbac(inv) + check_workloads(inv) + check_network_policies(inv)
+# ---------------------------------------------------------------- cloud IAM
+def _cloud_annotations(obj):
+    """(identity_annotations, deprecated_annotations) on one object.
+
+    identity_annotations: {annotation_key: (provider_label, value)} for
+    current workload-identity mechanisms; deprecated_annotations the
+    same for retired mechanisms (Azure pod-identity).
+    """
+    annotations = (obj.get("metadata") or {}).get("annotations") or {}
+    identity, deprecated = {}, {}
+    for key, value in annotations.items():
+        if key in CLOUD_IDENTITY_ANNOTATIONS:
+            identity[key] = (CLOUD_IDENTITY_ANNOTATIONS[key], value)
+        elif key in DEPRECATED_IDENTITY_ANNOTATIONS:
+            deprecated[key] = (DEPRECATED_IDENTITY_ANNOTATIONS[key], value)
+    return identity, deprecated
+
+
+def _broad_cloud_role(value):
+    """Return the reason a cloud role reference is over-broad, or None.
+
+    Judged only from the reference itself: a wildcard ARN, the AWS
+    AdministratorAccess managed policy, or a role whose name is one of
+    the known over-broad roles (Owner / Editor / Contributor / admin).
+    GKE service-account emails and Azure client IDs carry no role
+    information in the annotation, so they are never judged here — a
+    scoped GKE/Azure identity fires IAM-001 only.
+    """
+    text = str(value or "")
+    if "*" in text:
+        return "wildcard '*' in the cloud role reference '%s'" % text
+    lowered = text.lower()
+    if "administratoraccess" in lowered:
+        return "references the AWS AdministratorAccess policy '%s'" % text
+    # AWS ARN: ...:role/<name> (or ...:role/service-role/<name>);
+    # judge the role name only, never the account id or path.
+    role_name = text.rsplit("/", 1)[-1].lower() if ":role/" in text else ""
+    if role_name in BROAD_CLOUD_ROLES:
+        return "references the over-broad cloud role '%s'" % text
+    return None
+
+
+def check_cloud_iam(inv):
+    """IAM-001/002/003 — cloud workload-identity annotations (v1.4).
+
+    Scans ServiceAccounts (where the annotations normally live) and
+    workload pod templates (some setups annotate the pod). A pod that
+    runs as a ServiceAccount mapped to a cloud role inherits that
+    role's permissions in the cloud account — a cluster compromise
+    becomes a cloud-account compromise.
+    """
+    findings = []
+    targets = []
+    for sa in inv.service_accounts.values():
+        targets.append((sa, "ServiceAccount"))
+    for obj in inv.workloads:
+        spec = pod_spec(obj)
+        if not spec:
+            continue
+        template = ((obj.get("spec") or {}).get("template") or {}).get(
+            "metadata") or {}
+        if obj.get("kind") == "Pod":
+            template = obj.get("metadata") or {}
+        if obj.get("kind") == "CronJob":
+            template = ((((obj.get("spec") or {}).get("jobTemplate") or {})
+                         .get("spec") or {}).get("template") or {}).get(
+                             "metadata") or {}
+        if template.get("annotations"):
+            fake = {"kind": obj.get("kind"),
+                    "metadata": {"name": obj_name(obj),
+                                 "namespace": obj_ns(obj),
+                                 "annotations": template.get("annotations")},
+                    "__file__": obj.get("__file__", "")}
+            targets.append((fake, "pod template of %s" % obj_id(obj)))
+    for obj, where in targets:
+        identity, deprecated = _cloud_annotations(obj)
+        for key, (provider, value) in sorted(identity.items()):
+            findings.append(make_finding(
+                "IAM-001", obj,
+                "%s of %s carries %s annotation '%s: %s' — the pod "
+                "inherits the cloud role's permissions" % (
+                    where, obj_id(obj), provider, key, value)))
+            broad = _broad_cloud_role(value)
+            if broad:
+                findings.append(make_finding(
+                    "IAM-002", obj,
+                    "%s of %s %s" % (where, obj_id(obj), broad)))
+        for key, (provider, value) in sorted(deprecated.items()):
+            findings.append(make_finding(
+                "IAM-001", obj,
+                "%s of %s carries %s annotation '%s: %s' — the pod "
+                "inherits the cloud role's permissions" % (
+                    where, obj_id(obj), provider, key, value)))
+            findings.append(make_finding(
+                "IAM-003", obj,
+                "%s of %s uses deprecated %s annotation '%s: %s'" % (
+                    where, obj_id(obj), provider, key, value)))
+    return findings
+
+
+# ---------------------------------------------------------------- image CVEs
+# Map an image repository (last path segment, without registry) to the
+# NVD CPE product(s) to look up, in order. Only well-known public images
+# are mapped — an unmapped image is reported as "no CPE mapping", never
+# guessed at. (OSV was tried first: its API works, but it does not index
+# container images — ecosystem "Docker" is rejected and pkg:docker purls
+# return nothing — so the lookup uses the NVD API 2.0 instead.)
+IMAGE_CPE_MAP = {
+    "nginx": [("a", "f5", "nginx"), ("a", "nginx", "nginx")],
+    "redis": [("a", "redis", "redis")],
+    "postgres": [("a", "postgresql", "postgresql")],
+    "mysql": [("a", "oracle", "mysql"), ("a", "mysql", "mysql")],
+    "mongo": [("a", "mongodb", "mongodb")],
+    "busybox": [("a", "busybox", "busybox")],
+    "alpine": [("o", "alpinelinux", "alpine_linux")],
+    "python": [("a", "python", "python")],
+    "node": [("a", "nodejs", "node.js")],
+    "golang": [("a", "golang", "go")],
+    "go": [("a", "golang", "go")],
+    "httpd": [("a", "apache", "http_server")],
+    "memcached": [("a", "memcached", "memcached")],
+    "rabbitmq": [("a", "rabbitmq", "rabbitmq")],
+    "elasticsearch": [("a", "elastic", "elasticsearch")],
+    "kibana": [("a", "elastic", "kibana")],
+    "grafana": [("a", "grafana", "grafana")],
+    "prometheus": [("a", "prometheus", "prometheus")],
+    "traefik": [("a", "traefik", "traefik")],
+    "vault": [("a", "hashicorp", "vault")],
+    "consul": [("a", "hashicorp", "consul")],
+    "wordpress": [("a", "wordpress", "wordpress")],
+    "php": [("a", "php", "php")],
+    "openjdk": [("a", "oracle", "openjdk")],
+    "tomcat": [("a", "apache", "tomcat")],
+    "envoy": [("a", "envoyproxy", "envoy")],
+}
+
+# NVD API 2.0 allows 5 requests per 30 seconds without an API key, so
+# requests are spaced 6.5s apart; with RBACLENS_NVD_API_KEY set the
+# limit is 50 per 30 seconds and 0.7s spacing is enough.
+NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NVD_DELAY_NO_KEY = 6.5
+NVD_DELAY_WITH_KEY = 0.7
+NVD_TIMEOUT = 20
+
+
+def _image_repo_tag(image):
+    """Return (repo_last_segment, tag or None) for an image reference."""
+    base = image.split("@")[0]
+    repo = base.rsplit(":", 1)[0] if ":" in base.rsplit("/", 1)[-1] \
+        else base
+    tag = base.rsplit(":", 1)[1] if ":" in base.rsplit("/", 1)[-1] else None
+    return repo.rsplit("/", 1)[-1].lower(), tag
+
+
+def _precise_version(tag):
+    """Return the leading exact dotted version (x.y.z) of a tag, or None.
+
+    Only an exact version can be matched in NVD. 'latest', untagged,
+    '7' and '3.19' return None — NVD would silently return nothing for
+    those, which must never be reported as 'no CVEs'. A suffix such as
+    '-alpine' is stripped: the query uses the leading version only.
+    """
+    if not tag or tag == "latest":
+        return None
+    match = re.match(r"(\d+\.\d+\.\d+)", tag)
+    return match.group(1) if match else None
+
+
+def _max_cvss(vuln):
+    """Highest CVSS base score in an NVD vulnerability entry, or None."""
+    metrics = (vuln.get("cve") or {}).get("metrics") or {}
+    best = None
+    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for entry in metrics.get(key) or []:
+            score = (entry.get("cvssData") or {}).get("baseScore")
+            if isinstance(score, (int, float)):
+                best = score if best is None else max(best, score)
+    return best
+
+
+def nvd_query_cpe(part, vendor, product, version, timeout=NVD_TIMEOUT):
+    """Query the NVD API 2.0 for one CPE. Returns the parsed JSON dict.
+
+    Raises ValueError on any network, HTTP or parse failure — the
+    caller turns that into 'offline — CVE check skipped', never into
+    invented data. A 429 (rate limit) is a ValueError too.
+    """
+    cpe = "cpe:2.3:%s:%s:%s:%s:*:*:*:*:*:*:*" % (
+        part, vendor, product, version)
+    url = "%s?%s" % (NVD_API_URL, urllib.parse.urlencode(
+        {"cpeName": cpe, "resultsPerPage": 10}))
+    headers = {"User-Agent": "RBACLens/%s (authorized security audit)"
+               % VERSION}
+    api_key = os.environ.get("RBACLENS_NVD_API_KEY")
+    if api_key:
+        headers["apiKey"] = api_key
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        raise ValueError("NVD API HTTP %s" % exc.code) from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise ValueError("NVD API unreachable: %s" % exc) from exc
+
+
+def check_cve(inv, fetcher=None):
+    """CVE-001 — known CVEs for the images in the inventory (v1.4).
+
+    Returns (findings, status). status is a dict with an overall
+    'state' ('ok', 'offline' or 'not-run'), a human 'note', and a
+    per-image record: 'checked' (with CVE count + top IDs), 'skipped'
+    (reason: no CPE mapping / version not precise), or 'error'.
+
+    fetcher(part, vendor, product, version) -> NVD JSON dict is
+    injectable for tests; the default fetcher is nvd_query_cpe with
+    the NVD rate-limit delay between requests. On ANY lookup failure
+    the remaining images are marked 'error' and the state becomes
+    'offline' — the scan never crashes and never claims 'no CVEs'
+    for an image it could not actually check.
+    """
+    fetcher = fetcher or nvd_query_cpe
+    delay = NVD_DELAY_WITH_KEY if os.environ.get("RBACLENS_NVD_API_KEY") \
+        else NVD_DELAY_NO_KEY
+    findings, per_image, state, note = [], {}, "ok", ""
+    # Phase 1 — one lookup per distinct image, whatever uses it.
+    images = []
+    for obj in inv.workloads:
+        spec = pod_spec(obj)
+        if not spec:
+            continue
+        for container in (spec.get("containers") or []) + \
+                (spec.get("initContainers") or []):
+            image = container.get("image", "")
+            if image and image not in images:
+                images.append(image)
+    first_request = True
+    for image in images:
+        repo, tag = _image_repo_tag(image)
+        cands = IMAGE_CPE_MAP.get(repo)
+        if not cands:
+            per_image[image] = {"status": "skipped",
+                                "reason": "no CPE mapping for image '%s' — CVE lookup not applicable" % repo}
+            continue
+        version = _precise_version(tag)
+        if not version:
+            per_image[image] = {
+                "status": "skipped",
+                "reason": "tag '%s' is not an exact version — pin an exact x.y.z tag for a CVE lookup" % tag}
+            continue
+        if state == "offline":
+            per_image[image] = {"status": "error",
+                                "reason": "CVE lookup stopped: NVD unreachable"}
+            continue
+        vulns, max_score = [], None
+        try:
+            for part, vendor, product in cands:
+                # NVD rate limit: sleep between requests, never
+                # before the first one.
+                if not first_request:
+                    time.sleep(delay)
+                first_request = False
+                data = fetcher(part, vendor, product, version)
+                vulns = (data or {}).get("vulnerabilities") or []
+                if vulns:
+                    break
+        except ValueError as exc:
+            state, note = "offline", str(exc)
+            per_image[image] = {"status": "error", "reason": str(exc)}
+            continue
+        ids = [(v.get("cve") or {}).get("id", "?") for v in vulns]
+        for v in vulns:
+            score = _max_cvss(v)
+            if score is not None:
+                max_score = score if max_score is None else max(
+                    max_score, score)
+        per_image[image] = {"status": "checked", "cves": len(ids),
+                            "cve_ids": ids[:5],
+                            "max_cvss": max_score}
+    # Phase 2 — one CVE-001 finding per container using a vulnerable image.
+    for obj in inv.workloads:
+        spec = pod_spec(obj)
+        if not spec:
+            continue
+        for container in (spec.get("containers") or []) + \
+                (spec.get("initContainers") or []):
+            image = container.get("image", "")
+            record = per_image.get(image) or {}
+            if record.get("status") != "checked" or not record.get("cves"):
+                continue
+            ids = record["cve_ids"]
+            total = record["cves"]
+            max_score = record.get("max_cvss")
+            f = make_finding(
+                "CVE-001", obj,
+                "image '%s' has %d known CVE(s) (NVD): %s%s" % (
+                    image, total, ", ".join(ids),
+                    " (showing 5 of %d)" % total if total > 5 else ""))
+            if max_score is not None:
+                f["evidence"] += " — highest CVSS %.1f" % max_score
+            if max_score is not None and max_score >= 9.0:
+                f["severity"] = "critical"
+                f["points"] = SEVERITY_POINTS["critical"]
+            findings.append(f)
+    if state == "offline":
+        note = "CVE check incomplete — %s. Images not checked are " \
+               "marked 'error', never reported as clean." % note
+    elif not per_image:
+        note = "no container images found to check"
+    else:
+        checked = sum(1 for v in per_image.values()
+                      if v["status"] == "checked")
+        note = "%d image(s) checked against NVD, %d skipped (%s)" % (
+            checked, len(per_image) - checked,
+            "no CPE mapping or no exact version tag")
+    return findings, {"state": state, "note": note, "images": per_image}
+
+
+def run_all_checks(inv, cve_findings=None):
+    findings = check_rbac(inv) + check_workloads(inv) \
+        + check_network_policies(inv) + check_cloud_iam(inv)
+    if cve_findings:
+        findings += cve_findings
     findings.sort(key=lambda f: (SEVERITY_ORDER[f["severity"]], f["rule"], f["object"]))
     return findings
 
@@ -825,6 +1242,609 @@ def run_all_checks(inv):
 def score_findings(findings):
     score = 100 + sum(f["points"] for f in findings)
     return max(0, min(100, score))
+
+
+# ---------------------------------------------------------------- enforcement
+# Admission-control policies and fixed manifests (v1.4). The audit is
+# report-only no longer: from the findings, RBACLens can generate
+# Kyverno ClusterPolicies and OPA Gatekeeper constraints that BLOCK the
+# flagged patterns at admission time, and corrected copies of the
+# manifests with the safe fixes applied.
+#
+# Kyverno JMESPath shapes: a Pod keeps its containers at spec.containers,
+# a Deployment/StatefulSet/DaemonSet/Job at spec.template.spec, and a
+# CronJob one level deeper (spec.jobTemplate.spec.template.spec). The
+# expressions below try each shape in turn (JMESPath || falls through
+# null/empty values), so one rule covers all of them.
+def _containers_expr():
+    return ("(request.object.spec.template.spec.containers || "
+            "request.object.spec.containers || "
+            "request.object.spec.jobTemplate.spec.template.spec.containers "
+            "|| `[]`)")
+
+
+def _podspec_expr():
+    return ("(request.object.spec.template.spec || "
+            "request.object.spec.jobTemplate.spec.template.spec || "
+            "request.object.spec)")
+
+
+def _volumes_expr():
+    return ("(request.object.spec.template.spec.volumes || "
+            "request.object.spec.volumes || "
+            "request.object.spec.jobTemplate.spec.template.spec.volumes "
+            "|| `[]`)")
+
+
+WORKLOAD_MATCH_KINDS = ["Deployment", "StatefulSet", "DaemonSet", "Job",
+                        "CronJob", "Pod", "ReplicaSet",
+                        "ReplicationController"]
+
+
+def _kyverno_rule(name, message, conditions, kinds=None):
+    """One Kyverno validation rule with a deny block.
+
+    conditions is a list of (key_jmespath, operator, value) tuples;
+    a single condition goes under 'any', several under 'all'.
+    """
+    conds = [{"key": "{{ %s }}" % key, "operator": op, "value": value}
+             for key, op, value in conditions]
+    block = {"any": conds} if len(conds) == 1 else {"all": conds}
+    return {
+        "name": name,
+        "match": {"any": [{"resources": {
+            "kinds": kinds or WORKLOAD_MATCH_KINDS}}]},
+        "validate": {"message": message, "deny": {"conditions": block}},
+    }
+
+
+def _kyverno_rules_for(categories):
+    """Kyverno rules for the given enforcement categories."""
+    c = _containers_expr()
+    p = _podspec_expr()
+    v = _volumes_expr()
+    rules = []
+    if "privileged" in categories:
+        rules.append(_kyverno_rule(
+            "block-privileged-containers",
+            "RBACLens WL-001: privileged containers are not allowed.",
+            [("%s[?securityContext.privileged == `true`] | length(@)"
+              % c, "GreaterThan", 0)]))
+    if "host-namespaces" in categories:
+        for field, rule_id in (("hostNetwork", "WL-003"),
+                               ("hostPID", "WL-004"),
+                               ("hostIPC", "WL-005")):
+            rules.append(_kyverno_rule(
+                "block-host-%s" % field[4:].lower(),
+                "RBACLens %s: %s is not allowed." % (rule_id, field),
+                [("%s.%s" % (p, field), "Equals", True)]))
+    if "hostpath" in categories:
+        rules.append(_kyverno_rule(
+            "block-hostpath-volumes",
+            "RBACLens WL-006: hostPath volumes are not allowed.",
+            [("%s[?hostPath] | length(@)" % v, "GreaterThan", 0)]))
+    if "privilege-escalation" in categories:
+        rules.append(_kyverno_rule(
+            "block-privilege-escalation",
+            "RBACLens WL-002: allowPrivilegeEscalation must be false.",
+            [("%s[?securityContext.allowPrivilegeEscalation == `true`] "
+              "| length(@)" % c, "GreaterThan", 0)]))
+    if "run-as-root" in categories:
+        # Container-level runAsNonRoot wins in Kubernetes; pod-level is
+        # the fallback. Deny only when neither is true — a container
+        # with an explicit runAsNonRoot: false under a pod-level true
+        # is NOT caught by this rule (see the policy annotation).
+        rules.append(_kyverno_rule(
+            "require-run-as-non-root",
+            "RBACLens WL-007: containers must run as non-root "
+            "(runAsNonRoot: true).",
+            [("%s[?securityContext.runAsNonRoot != `true`] | length(@)"
+              % c, "GreaterThan", 0),
+             ("%s.securityContext.runAsNonRoot" % p, "NotEquals", True)]))
+    if "capabilities" in categories:
+        rules.append(_kyverno_rule(
+            "require-drop-all-capabilities",
+            "RBACLens PSS-002: containers must drop ALL capabilities.",
+            [("%s[?!contains(securityContext.capabilities.drop || `[]`, "
+              "'ALL')] | length(@)" % c, "GreaterThan", 0)]))
+        any_conds = []
+        for cap in sorted(DANGEROUS_CAPABILITIES - {"ALL"}):
+            any_conds.append({
+                "key": "{{ %s[?contains(securityContext.capabilities.add "
+                       "|| `[]`, '%s')] | length(@) }}" % (c, cap),
+                "operator": "GreaterThan", "value": 0})
+        rules.append({
+            "name": "block-dangerous-capabilities",
+            "match": {"any": [{"resources": {
+                "kinds": WORKLOAD_MATCH_KINDS}}]},
+            "validate": {
+                "message": "RBACLens WL-010: dangerous Linux capabilities "
+                           "are not allowed.",
+                "deny": {"conditions": {"any": any_conds}}},
+        })
+    if "readonly-rootfs" in categories:
+        rules.append(_kyverno_rule(
+            "require-readonly-root-filesystem",
+            "RBACLens WL-011: readOnlyRootFilesystem must be true.",
+            [("%s[?securityContext.readOnlyRootFilesystem != `true`] "
+              "| length(@)" % c, "GreaterThan", 0)]))
+    if "seccomp" in categories:
+        rules.append(_kyverno_rule(
+            "require-seccomp-profile",
+            "RBACLens PSS-001: seccompProfile.type must be "
+            "RuntimeDefault or Localhost.",
+            [("%s.securityContext.seccompProfile.type" % p,
+              "NotEquals", "RuntimeDefault"),
+             ("%s.securityContext.seccompProfile.type" % p,
+              "NotEquals", "Localhost")]))
+    if "image-latest" in categories:
+        rules.append(_kyverno_rule(
+            "block-latest-images",
+            "RBACLens IMG-001: images must use an exact version tag, "
+            "never :latest and never untagged.",
+            [("%s[?ends_with(image, ':latest') || "
+              "!contains(split(image, '/')[-1], ':')] | length(@)" % c,
+              "GreaterThan", 0)]))
+    if "sa-token" in categories:
+        rules.append(_kyverno_rule(
+            "block-service-account-token-mount",
+            "RBACLens WL-009: automountServiceAccountToken must be false.",
+            [("%s.automountServiceAccountToken" % p, "Equals", True)]))
+    if "cluster-admin" in categories:
+        rules.append({
+            "name": "block-cluster-admin-bindings",
+            "match": {"any": [{"resources": {
+                "kinds": ["ClusterRoleBinding", "RoleBinding"]}}]},
+            "validate": {
+                "message": "RBACLens RBAC-001: bindings to the "
+                           "cluster-admin role are not allowed.",
+                "pattern": {"roleRef": {"name": "!cluster-admin"}}},
+        })
+    return rules
+
+
+# Finding rule -> enforcement category. Categories with no rule in the
+# findings are still generated when the scan is clean (baseline policy).
+ADMISSION_CATEGORIES = {
+    "privileged": {"WL-001"},
+    "host-namespaces": {"WL-003", "WL-004", "WL-005"},
+    "hostpath": {"WL-006"},
+    "privilege-escalation": {"WL-002"},
+    "run-as-root": {"WL-007"},
+    "capabilities": {"WL-010", "PSS-002", "PSS-003"},
+    "readonly-rootfs": {"WL-011"},
+    "seccomp": {"PSS-001"},
+    "image-latest": {"IMG-001"},
+    "sa-token": {"WL-009"},
+    "cluster-admin": {"RBAC-001"},
+}
+
+
+def admission_categories_for(findings):
+    """Categories to enforce: those the findings prove are needed, or
+    all of them when the scan is clean (baseline policy)."""
+    found = {f["rule"] for f in findings}
+    cats = {cat for cat, rules in ADMISSION_CATEGORIES.items()
+            if found & rules}
+    return cats or set(ADMISSION_CATEGORIES)
+
+
+def build_kyverno_policy(findings):
+    """Return a Kyverno ClusterPolicy (YAML text) enforcing the
+    categories the findings call for. validationFailureAction is
+    Enforce: matching objects are blocked at admission."""
+    cats = admission_categories_for(findings)
+    policy = {
+        "apiVersion": "kyverno.io/v1",
+        "kind": "ClusterPolicy",
+        "metadata": {
+            "name": "rbaclens-enforce",
+            "annotations": {
+                "policies.kyverno.io/title":
+                    "RBACLens enforcement (generated by RBACLens %s)" % VERSION,
+                "policies.kyverno.io/description":
+                    "Blocks the patterns RBACLens flagged in this scan "
+                    "(%d finding(s)). Generated from a scan — review "
+                    "before applying with kubectl apply -f. Note: the "
+                    "require-run-as-non-root rule does not catch a "
+                    "container with an explicit runAsNonRoot: false "
+                    "under a pod-level runAsNonRoot: true."
+                    % len(findings),
+                "rbaclens/categories": ",".join(sorted(cats)),
+            },
+        },
+        "spec": {
+            "validationFailureAction": "Enforce",
+            "background": True,
+            "rules": _kyverno_rules_for(cats),
+        },
+    }
+    return yaml.safe_dump(policy, sort_keys=False, allow_unicode=True)
+
+
+# ---------------------------------------------------------------- Gatekeeper
+GATEKEEPER_REGO = '''package rbaclens
+
+# One template covers the workload categories; a second one (below the
+# --- separator, in the same bundle) covers RBAC bindings. Containers
+# and pod specs are collected from every shape: plain Pods, workloads
+# with a pod template, and CronJobs (one level deeper).
+
+container(c) if {
+    c := input.review.object.spec.containers[_]
+}
+
+container(c) if {
+    c := input.review.object.spec.template.spec.containers[_]
+}
+
+container(c) if {
+    c := input.review.object.spec.jobTemplate.spec.template.spec.containers[_]
+}
+
+podspec(s) if {
+    s := input.review.object.spec
+}
+
+podspec(s) if {
+    s := input.review.object.spec.template.spec
+}
+
+podspec(s) if {
+    s := input.review.object.spec.jobTemplate.spec.template.spec
+}
+
+volumes(v) if {
+    v := input.review.object.spec.volumes[_]
+}
+
+volumes(v) if {
+    v := input.review.object.spec.template.spec.volumes[_]
+}
+
+volumes(v) if {
+    v := input.review.object.spec.jobTemplate.spec.template.spec.volumes[_]
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "privileged"
+    container(c)
+    c.securityContext.privileged == true
+    msg := sprintf("RBACLens WL-001: privileged container %v is not allowed", [c.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "host-namespaces"
+    podspec(s)
+    s.hostNetwork == true
+    msg := "RBACLens WL-003: hostNetwork is not allowed"
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "host-namespaces"
+    podspec(s)
+    s.hostPID == true
+    msg := "RBACLens WL-004: hostPID is not allowed"
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "host-namespaces"
+    podspec(s)
+    s.hostIPC == true
+    msg := "RBACLens WL-005: hostIPC is not allowed"
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "hostpath"
+    volumes(v)
+    v.hostPath
+    msg := sprintf("RBACLens WL-006: hostPath volume %v is not allowed", [v.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "privilege-escalation"
+    container(c)
+    c.securityContext.allowPrivilegeEscalation == true
+    msg := sprintf("RBACLens WL-002: allowPrivilegeEscalation on container %v must be false", [c.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "run-as-root"
+    container(c)
+    c.securityContext.runAsNonRoot != true
+    podspec(s)
+    s.securityContext.runAsNonRoot != true
+    msg := sprintf("RBACLens WL-007: container %v must run as non-root (runAsNonRoot: true)", [c.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "capabilities"
+    container(c)
+    not "ALL" in object.get(c.securityContext.capabilities, "drop", [])
+    msg := sprintf("RBACLens PSS-002: container %v must drop ALL capabilities", [c.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "capabilities"
+    container(c)
+    some cap in object.get(c.securityContext.capabilities, "add", [])
+    cap in {"SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "DAC_OVERRIDE", "SETUID", "SETGID", "NET_RAW", "SYS_MODULE", "SYS_TIME"}
+    msg := sprintf("RBACLens WL-010: dangerous capability %v on container %v is not allowed", [cap, c.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "readonly-rootfs"
+    container(c)
+    c.securityContext.readOnlyRootFilesystem != true
+    msg := sprintf("RBACLens WL-011: container %v must set readOnlyRootFilesystem: true", [c.name])
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "seccomp"
+    podspec(s)
+    s.securityContext.seccompProfile.type != "RuntimeDefault"
+    s.securityContext.seccompProfile.type != "Localhost"
+    msg := "RBACLens PSS-001: seccompProfile.type must be RuntimeDefault or Localhost"
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "image-latest"
+    container(c)
+    image_untagged_or_latest(c.image)
+    msg := sprintf("RBACLens IMG-001: image %v must use an exact version tag, never :latest and never untagged", [c.image])
+}
+
+image_untagged_or_latest(img) if {
+    endswith(img, ":latest")
+}
+
+image_untagged_or_latest(img) if {
+    parts := split(img, "/")
+    last := parts[count(parts) - 1]
+    not contains(last, ":")
+}
+
+violation contains {"msg": msg} if {
+    input.parameters.categories[_] == "sa-token"
+    podspec(s)
+    s.automountServiceAccountToken == true
+    msg := "RBACLens WL-009: automountServiceAccountToken must be false"
+}
+'''
+
+GATEKEEPER_BINDING_REGO = '''package rbaclensbinding
+
+violation contains {"msg": msg} if {
+    input.review.object.roleRef.name == "cluster-admin"
+    msg := "RBACLens RBAC-001: bindings to the cluster-admin role are not allowed"
+}
+'''
+
+
+def build_gatekeeper_bundle(findings):
+    """Return a Gatekeeper bundle (YAML text): a ConstraintTemplate +
+    Constraint for the workload categories, and — when the scan found
+    cluster-admin bindings (or is clean, i.e. baseline) — a second
+    template + constraint for RBAC bindings."""
+    cats = admission_categories_for(findings)
+    docs = [{
+        "apiVersion": "templates.gatekeeper.sh/v1",
+        "kind": "ConstraintTemplate",
+        "metadata": {"name": "rbaclensworkload"},
+        "spec": {
+            "crd": {"spec": {"names": {"kind": "RBACLensWorkload"},
+                             "validation": {"openAPIV3Schema": {
+                                 "type": "object",
+                                 "properties": {"categories": {
+                                     "type": "array",
+                                     "items": {"type": "string"}}}}}}},
+            "targets": [{"target": "admission.k8s.gatekeeper.sh",
+                         "rego": GATEKEEPER_REGO}],
+        },
+    }, {
+        "apiVersion": "constraints.gatekeeper.sh/v1beta1",
+        "kind": "RBACLensWorkload",
+        "metadata": {"name": "rbaclens-workload"},
+        "spec": {
+            "match": {"kinds": [{"apiGroups": ["apps", "batch", ""],
+                                  "kinds": WORKLOAD_MATCH_KINDS}]},
+            "parameters": {"categories": sorted(cats)},
+        },
+    }]
+    if "cluster-admin" in cats:
+        docs += [{
+            "apiVersion": "templates.gatekeeper.sh/v1",
+            "kind": "ConstraintTemplate",
+            "metadata": {"name": "rbaclensbinding"},
+            "spec": {
+                "crd": {"spec": {"names": {"kind": "RBACLensBinding"},
+                                 "validation": {"openAPIV3Schema": {
+                                     "type": "object"}}}},
+                "targets": [{"target": "admission.k8s.gatekeeper.sh",
+                             "rego": GATEKEEPER_BINDING_REGO}],
+            },
+        }, {
+            "apiVersion": "constraints.gatekeeper.sh/v1beta1",
+            "kind": "RBACLensBinding",
+            "metadata": {"name": "rbaclens-binding"},
+            "spec": {
+                "match": {"kinds": [
+                    {"apiGroups": ["rbac.authorization.k8s.io"],
+                     "kinds": ["ClusterRoleBinding", "RoleBinding"]}]},
+            },
+        }]
+    return yaml.safe_dump_all(docs, sort_keys=False, allow_unicode=True)
+
+
+# ---------------------------------------------------------------- --fix-out
+DEFAULT_REQUESTS = {"cpu": "100m", "memory": "128Mi"}
+DEFAULT_LIMITS = {"cpu": "500m", "memory": "256Mi"}
+
+
+def _fix_container(container, where, applied):
+    """Apply the safe fixes to one container dict. Returns True if
+    anything changed."""
+    changed = False
+    csc = container.setdefault("securityContext", {})
+    if csc.get("privileged") is True:
+        csc["privileged"] = False
+        applied.append("%s: privileged: true -> false" % where)
+        changed = True
+    if csc.get("allowPrivilegeEscalation") is True:
+        csc["allowPrivilegeEscalation"] = False
+        applied.append("%s: allowPrivilegeEscalation: true -> false" % where)
+        changed = True
+    if csc.get("runAsNonRoot") is not True:
+        csc["runAsNonRoot"] = True
+        applied.append("%s: runAsNonRoot -> true" % where)
+        changed = True
+    if csc.get("readOnlyRootFilesystem") is not True:
+        csc["readOnlyRootFilesystem"] = True
+        applied.append("%s: readOnlyRootFilesystem -> true" % where)
+        changed = True
+    caps = csc.setdefault("capabilities", {})
+    drop = caps.setdefault("drop", [])
+    if "ALL" not in drop:
+        drop.append("ALL")
+        applied.append("%s: capabilities.drop += ALL" % where)
+        changed = True
+    add = caps.get("add") or []
+    removed = sorted(set(add) & DANGEROUS_CAPABILITIES)
+    if removed:
+        caps["add"] = [c for c in add if c not in DANGEROUS_CAPABILITIES]
+        applied.append("%s: removed dangerous capabilities %s" % (
+            where, removed))
+        changed = True
+    resources = container.setdefault("resources", {})
+    for group, defaults in (("requests", DEFAULT_REQUESTS),
+                            ("limits", DEFAULT_LIMITS)):
+        grp = resources.setdefault(group, {})
+        for key, value in defaults.items():
+            if key not in grp:
+                grp[key] = value
+                applied.append("%s: resources.%s.%s -> %s (default, tune it)"
+                               % (where, group, key, value))
+                changed = True
+    return changed
+
+
+def fix_manifests(objects, findings):
+    """Build fixed copies of the scanned manifests (v1.4).
+
+    Returns (fixed_by_file, applied, manual):
+    - fixed_by_file: {relative_path: [fixed docs]} — only files that
+      changed (originals are never touched).
+    - applied: human-readable lines of what was changed.
+    - manual: findings that need a human (hostPath, cluster-admin,
+      wildcards, image tags, NetworkPolicy, cloud IAM, CVEs).
+    Only safe, mechanical fixes are applied: booleans that lock a pod
+    down, drop ALL, and default resource requests/limits (labelled as
+    defaults to tune). Anything that changes what the workload can do
+    or reach is left for a human.
+    """
+    by_file = {}
+    for obj in objects:
+        fname = obj.get("__file__", "")
+        if not fname or fname == "live-cluster":
+            continue
+        doc = copy.deepcopy(obj)
+        doc.pop("__file__", None)
+        by_file.setdefault(fname, []).append(doc)
+    fixed_by_file, applied = {}, []
+    for fname, docs in by_file.items():
+        changed = False
+        for doc in docs:
+            if doc.get("kind") not in WORKLOAD_KINDS:
+                continue
+            spec = pod_spec(doc)
+            if not spec:
+                continue
+            where = obj_id(doc)
+            pod_sc = spec.setdefault("securityContext", {})
+            for field in ("hostNetwork", "hostPID", "hostIPC"):
+                if spec.get(field) is True:
+                    spec[field] = False
+                    applied.append("%s: %s: true -> false" % (where, field))
+                    changed = True
+            if spec.get("automountServiceAccountToken") is not False:
+                spec["automountServiceAccountToken"] = False
+                applied.append("%s: automountServiceAccountToken -> false"
+                               % where)
+                changed = True
+            seccomp = pod_sc.setdefault("seccompProfile", {})
+            if seccomp.get("type") not in ("RuntimeDefault", "Localhost"):
+                seccomp["type"] = "RuntimeDefault"
+                applied.append("%s: seccompProfile.type -> RuntimeDefault"
+                               % where)
+                changed = True
+            if pod_sc.get("runAsNonRoot") is not True:
+                pod_sc["runAsNonRoot"] = True
+                applied.append("%s: pod runAsNonRoot -> true" % where)
+                changed = True
+            if "runAsUser" not in pod_sc:
+                pod_sc["runAsUser"] = 10001
+                applied.append("%s: pod runAsUser -> 10001" % where)
+                changed = True
+            for container in (spec.get("containers") or []) + \
+                    (spec.get("initContainers") or []):
+                cwhere = "%s container '%s'" % (
+                    where, container.get("name", "?"))
+                if _fix_container(container, cwhere, applied):
+                    changed = True
+        if changed:
+            fixed_by_file[fname] = docs
+    manual = []
+    manual_rules = {"RBAC-001", "RBAC-002", "RBAC-003", "RBAC-004",
+                    "RBAC-005", "RBAC-006", "RBAC-007", "RBAC-008",
+                    "RBAC-009", "RBAC-010", "RBAC-011", "WL-006",
+                    "IMG-001", "IMG-002", "NET-001", "IAM-001", "IAM-002",
+                    "IAM-003", "CVE-001"}
+    for f in findings:
+        if f["rule"] in manual_rules:
+            manual.append("[%s] %s — %s (%s)" % (
+                f["severity"].upper(), f["rule"], f["title"], f["object"]))
+    return fixed_by_file, applied, manual
+
+
+def write_fix_output(objects, findings, out_dir):
+    """Write fixed manifests + FIXES.md into out_dir. Returns the
+    (files_written, applied_count, manual_count) tuple."""
+    fixed_by_file, applied, manual = fix_manifests(objects, findings)
+    os.makedirs(out_dir, exist_ok=True)
+    written = 0
+    for fname, docs in fixed_by_file.items():
+        # Keep the scanned folder's relative layout under out_dir.
+        rel = os.path.basename(fname)
+        dest = os.path.join(out_dir, rel)
+        with open(dest, "w", encoding="utf-8") as fh:
+            yaml.safe_dump_all(docs, fh, sort_keys=False,
+                               allow_unicode=True)
+        written += 1
+    lines = ["# RBACLens fixed manifests",
+             "",
+             "Generated by RBACLens %s from a scan. These are SUGGESTED "
+             "fixes — review every change, re-scan the fixed folder with "
+             "RBACLens, and only then apply them to a cluster you own or "
+             "have written permission to change." % VERSION,
+             "",
+             "## Applied fixes (%d)" % len(applied)]
+    lines += ["- %s" % a for a in applied] or ["- (none — nothing was auto-fixable)"]
+    lines += ["", "## Needs a human (%d)" % len(manual),
+              "",
+              "These findings cannot be fixed mechanically — they change "
+              "what the workload can do or reach, or need a version a "
+              "tool cannot invent (image tags, cloud roles, CVEs):",
+              ""]
+    lines += ["- %s" % m for m in manual] or ["- (none)"]
+    lines += ["",
+              "Note: YAML comments and original formatting are not "
+              "preserved in the fixed files (they are re-serialised). "
+              "Check the diff before applying.",
+              ""]
+    with open(os.path.join(out_dir, "FIXES.md"), "w",
+              encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    return written, len(applied), len(manual)
 
 
 # ---------------------------------------------------------------- reports
@@ -835,7 +1855,8 @@ def summary_counts(findings):
     return counts
 
 
-def build_text_report(path, inv, findings, score, grade, errors):
+def build_text_report(path, inv, findings, score, grade, errors,
+                      cve_status=None):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c = inv.counts()
     counts = summary_counts(findings)
@@ -856,6 +1877,30 @@ def build_text_report(path, inv, findings, score, grade, errors):
                      c["role_bindings"], c["cluster_role_bindings"],
                      c["service_accounts"], c["workloads"],
                      c["network_policies"]))
+    if c["roles"] + c["cluster_roles"] + c["role_bindings"] \
+            + c["cluster_role_bindings"] + c["workloads"] == 0:
+        # A folder with objects but nothing auditable must never look
+        # like a clean bill of health (v1.4: the false-clean guard).
+        lines.append("WARNING: inventory contains no roles, bindings or "
+                     "workloads — check the folder is complete; a clean "
+                     "score here may mean files are missing, not that "
+                     "the cluster is secure.")
+    if cve_status is not None:
+        lines.append("CVE check (--cve): %s — %s" % (
+            cve_status.get("state", "?"), cve_status.get("note", "")))
+        for image, rec in (cve_status.get("images") or {}).items():
+            if rec.get("status") == "checked":
+                lines.append("  - %s: %d CVE(s)%s" % (
+                    image, rec.get("cves", 0),
+                    (" (%s)" % ", ".join(rec.get("cve_ids") or []))
+                    if rec.get("cve_ids") else ""))
+            else:
+                lines.append("  - %s: %s — %s" % (
+                    image, rec.get("status", "?"),
+                    rec.get("reason", "")))
+    else:
+        lines.append("CVE check: not run (use --cve to look images up in "
+                     "the NVD vulnerability database)")
     if errors:
         lines.append("Parse errors: %d" % len(errors))
         for e in errors:
@@ -891,7 +1936,8 @@ def build_text_report(path, inv, findings, score, grade, errors):
     return "\n".join(lines) + "\n"
 
 
-def build_json_report(path, inv, findings, score, grade, errors):
+def build_json_report(path, inv, findings, score, grade, errors,
+                      cve_status=None):
     return {
         "tool": "RBACLens",
         "version": VERSION,
@@ -905,6 +1951,7 @@ def build_json_report(path, inv, findings, score, grade, errors):
         "grade": grade,
         "summary": summary_counts(findings),
         "total_findings": len(findings),
+        "cve": cve_status,
         "findings": findings,
     }
 
@@ -944,17 +1991,27 @@ def print_config(target, args):
     info("Output", args.output)
     info("JSON report", args.json or "—")
     info("Min severity", args.min_severity or "all")
-    checks = args.check or "all 25"
+    checks = args.check or "all %d" % len(RULES)
     if args.skip_check:
         checks += " (skip %s)" % args.skip_check
     info("Checks", checks)
     info("Fail on", args.fail_on or "critical (default)")
+    info("CVE lookup (NVD)", "on (--cve)" if getattr(args, "cve", False)
+         else "off")
+    info("Admission output", getattr(args, "admission_out", None) or "—")
+    info("Gatekeeper output", getattr(args, "gatekeeper_out", None) or "—")
+    info("Fixed manifests", getattr(args, "fix_out", None) or "—")
     sep()
 
 
-def finish_scan(target, inv, findings, errors, args):
+def finish_scan(target, inv, findings, errors, args, objects=None,
+                cve_status=None):
     """Filters, summary, reports and exit code — shared by file scans
-    and live-cluster scans. Returns (exit_code, findings, score, grade)."""
+    and live-cluster scans. Returns (exit_code, findings, score, grade).
+
+    Admission policies and fixed manifests are generated from the FULL
+    findings, not the filtered display — a --min-severity filter must
+    never silently drop a category from the enforcement output."""
     score = score_findings(findings)
     grade = grade_for(score)
 
@@ -972,16 +2029,40 @@ def finish_scan(target, inv, findings, errors, args):
         shown = [f for f in shown if f["rule"] not in skipped]
 
     print_summary(inv, shown, score, grade, quiet=args.quiet)
+    if cve_status is not None:
+        if cve_status.get("state") == "offline":
+            warn("CVE check incomplete — %s" % cve_status.get("note", ""))
+        else:
+            info("CVE check", cve_status.get("note", ""))
 
-    report = build_text_report(target, inv, shown, score, grade, errors)
+    report = build_text_report(target, inv, shown, score, grade, errors,
+                               cve_status=cve_status)
     with open(args.output, "w", encoding="utf-8") as fh:
         fh.write(report)
     ok("Report saved: %s" % args.output)
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump(build_json_report(target, inv, shown, score, grade, errors),
+            json.dump(build_json_report(target, inv, shown, score, grade,
+                                        errors, cve_status=cve_status),
                       fh, indent=2)
         ok("JSON report saved: %s" % args.json)
+    if getattr(args, "admission_out", None):
+        with open(args.admission_out, "w", encoding="utf-8") as fh:
+            fh.write(build_kyverno_policy(findings))
+        ok("Kyverno policy saved: %s" % args.admission_out)
+    if getattr(args, "gatekeeper_out", None):
+        with open(args.gatekeeper_out, "w", encoding="utf-8") as fh:
+            fh.write(build_gatekeeper_bundle(findings))
+        ok("Gatekeeper bundle saved: %s" % args.gatekeeper_out)
+    if getattr(args, "fix_out", None):
+        if objects is None:
+            warn("--fix-out needs the scanned objects; skipped")
+        else:
+            written, applied_n, manual_n = write_fix_output(
+                objects, findings, args.fix_out)
+            ok("Fixed manifests saved: %s (%d file(s), %d fix(es), "
+               "%d need a human)" % (args.fix_out, written, applied_n,
+                                     manual_n))
     for e in errors:
         warn("Parse error: %s" % e)
 
@@ -1013,11 +2094,20 @@ def scan_path(path, args):
         err(str(exc))
         return 2, [], 0, "F"
     if not objects and not errors:
-        warn("No Kubernetes manifests found in %s" % path)
-        return 0, [], 100, "A"
+        # v1.4: an empty scan is NOT a clean scan. Reporting 100/A for
+        # a folder with nothing in it was the false-clean bug in the
+        # v1.3 report — fail loudly instead.
+        err("No Kubernetes manifests found in %s — nothing was audited. "
+            "Check the path and that the folder actually contains "
+            "manifests; no report was written." % path)
+        return 2, [], 0, "F"
     inv = Inventory(objects)
-    findings = run_all_checks(inv)
-    return finish_scan(path, inv, findings, errors, args)
+    cve_findings, cve_status = [], None
+    if getattr(args, "cve", False):
+        cve_findings, cve_status = check_cve(inv)
+    findings = run_all_checks(inv, cve_findings=cve_findings)
+    return finish_scan(path, inv, findings, errors, args, objects=objects,
+                       cve_status=cve_status)
 
 
 def scan_live(args):
@@ -1040,11 +2130,17 @@ def scan_live(args):
         err(str(exc))
         return 2, [], 0, "F"
     if not objects and not errors:
-        warn("No Kubernetes resources found in the live cluster")
-        return 0, [], 100, "A"
+        err("No Kubernetes resources found in the live cluster — nothing "
+            "was audited. Check the cluster is reachable and the "
+            "namespace is right; no report was written.")
+        return 2, [], 0, "F"
     inv = Inventory(objects)
-    findings = run_all_checks(inv)
-    return finish_scan(target, inv, findings, errors, args)
+    cve_findings, cve_status = [], None
+    if getattr(args, "cve", False):
+        cve_findings, cve_status = check_cve(inv)
+    findings = run_all_checks(inv, cve_findings=cve_findings)
+    return finish_scan(target, inv, findings, errors, args, objects=objects,
+                       cve_status=cve_status)
 
 
 def list_checks():
@@ -1077,6 +2173,7 @@ MENU_OPTIONS = [
     (6, "Run step tests", "test"),
     (7, "Check setup (doctor)", "doctor"),
     (8, "Scan live cluster (kubectl)", "live"),
+    (9, "Enforce: admission policies + fixed manifests for a folder", "enforce"),
     (0, "Exit", None),
 ]
 
@@ -1139,6 +2236,15 @@ def doctor():
     else:
         warn("kubectl NOT found — live-cluster mode unavailable; "
              "file scans still work")
+    # CVE lookup (v1.4): optional, needs network. A failed check here
+    # is a warning only — --cve degrades to 'offline, skipped' at
+    # scan time and never blocks a file scan.
+    try:
+        nvd_query_cpe("a", "redis", "redis", "7.0.0", timeout=8)
+        ok("NVD API reachable — --cve image lookup will work")
+    except ValueError:
+        warn("NVD API not reachable — --cve lookups will be skipped "
+             "with a note (file scans still work)")
     if yaml is None:
         warn("Doctor: something is missing (see [!] lines above).")
         return 1
@@ -1203,8 +2309,19 @@ def menu(args):
                 args.output = "rbaclens_live_report.txt"
                 code, _f, _s, _g = scan_live(args)
                 print("Exit code: %d" % code)
+            elif choice == "9":
+                path = ask("ENTER MANIFEST FOLDER OR FILE", bad)
+                args.output = "rbaclens_report.txt"
+                args.admission_out = "rbaclens-admission-kyverno.yaml"
+                args.gatekeeper_out = "rbaclens-admission-gatekeeper.yaml"
+                args.fix_out = "rbaclens-fixed"
+                code, _f, _s, _g = scan_path(path or bad, args)
+                print("Exit code: %d" % code)
+                args.admission_out = None
+                args.gatekeeper_out = None
+                args.fix_out = None
             else:
-                err("Please input a number from the menu (0-8).")
+                err("Please input a number from the menu (0-9).")
                 time.sleep(1)
                 continue
         except (EOFError, KeyboardInterrupt):
@@ -1247,6 +2364,19 @@ def build_parser():
                    help="run only these rules, e.g. RBAC-001,WL-001")
     p.add_argument("--skip-check", default=None, metavar="RULES",
                    help="skip these rules, e.g. NET-001")
+    p.add_argument("--cve", action="store_true",
+                   help="look container images up in the NVD vulnerability "
+                        "database (needs network; offline it is skipped "
+                        "with a clear note, never a crash)")
+    p.add_argument("--admission-out", default=None, metavar="FILE",
+                   help="write a Kyverno ClusterPolicy (Enforce) that "
+                        "blocks the flagged patterns")
+    p.add_argument("--gatekeeper-out", default=None, metavar="FILE",
+                   help="write an OPA Gatekeeper bundle (ConstraintTemplate "
+                        "+ Constraints) that blocks the flagged patterns")
+    p.add_argument("--fix-out", default=None, metavar="DIR",
+                   help="write corrected copies of the manifests (safe "
+                        "fixes only) plus FIXES.md into DIR")
     p.add_argument("--inventory", action="store_true",
                    help="print the RBAC inventory and exit")
     p.add_argument("--list-checks", action="store_true",

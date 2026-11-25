@@ -1,8 +1,8 @@
 ================================================================
 RBACLens Report — Kubernetes RBAC and Workload Audit
 ================================================================
-Date: 2026-11-25 19:22:21
-Tool: RBACLens 1.3 (author: CyberBoy50)
+Date: 2026-11-25 19:47:28
+Tool: RBACLens 1.4 (author: CyberBoy50)
 Scanned: /home/hatch/workspace/rbaclens/test_manifests/bad
 
 DISCLAIMER — AUTHORIZED USE ONLY. This tool was built for
@@ -13,11 +13,18 @@ Only test systems, code, and data you own or have explicit
 written permission to test — testing anything else may be
 illegal (for example, PECA 2016 in Pakistan).
 
-Inventory: 16 objects (2 Roles, 3 ClusterRoles, 3 RoleBindings, 2 ClusterRoleBindings, 1 ServiceAccounts, 5 workloads, 0 NetworkPolicies)
+Inventory: 21 objects (2 Roles, 4 ClusterRoles, 3 RoleBindings, 2 ClusterRoleBindings, 4 ServiceAccounts, 6 workloads, 0 NetworkPolicies)
+CVE check: not run (use --cve to look images up in the NVD vulnerability database)
 
 Score: 0/100  (grade F)
-Findings: 57 total — 7 critical, 23 high, 16 medium, 11 low
+Findings: 62 total — 8 critical, 23 high, 20 medium, 11 low
 
+----------------------------------------------------------------
+[CRITICAL] IAM-002 — Cloud workload identity references an over-broad cloud role
+Object:    ServiceAccount/cloud-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml
+Evidence:  ServiceAccount of ServiceAccount/cloud-app (default) references the AWS AdministratorAccess policy 'arn:aws:iam::123456789012:role/AdministratorAccess'
+Fix:       Replace the over-broad cloud role (AdministratorAccess, Owner/Editor/Contributor, or a wildcard role) with a narrowly scoped role that lists only the permissions the workload needs.
 ----------------------------------------------------------------
 [CRITICAL] RBAC-001 — Binding grants the cluster-admin role
 Object:    ClusterRoleBinding/superadmin (-)
@@ -199,6 +206,30 @@ File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
 Evidence:  container 'app' of Deployment/debug-app (default): capabilities.add includes ['NET_ADMIN', 'SYS_ADMIN']
 Fix:       Drop the capability. Drop ALL capabilities and add back only what the container needs.
 ----------------------------------------------------------------
+[MEDIUM] IAM-001 — ServiceAccount is bound to a cloud workload identity
+Object:    ServiceAccount/cloud-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml
+Evidence:  ServiceAccount of ServiceAccount/cloud-app (default) carries AWS EKS IRSA annotation 'eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/AdministratorAccess' — the pod inherits the cloud role's permissions
+Fix:       Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more.
+----------------------------------------------------------------
+[MEDIUM] IAM-001 — ServiceAccount is bound to a cloud workload identity
+Object:    ServiceAccount/gke-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml
+Evidence:  ServiceAccount of ServiceAccount/gke-app (default) carries GKE Workload Identity annotation 'iam.gke.io/gcp-service-account: app@my-project.iam.gserviceaccount.com' — the pod inherits the cloud role's permissions
+Fix:       Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more.
+----------------------------------------------------------------
+[MEDIUM] IAM-001 — ServiceAccount is bound to a cloud workload identity
+Object:    ServiceAccount/legacy-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml
+Evidence:  ServiceAccount of ServiceAccount/legacy-app (default) carries Azure AD Pod Identity (deprecated) annotation 'aadpodidentity.k8s.io/identity: /subscriptions/0000/resourcegroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/legacy-id' — the pod inherits the cloud role's permissions
+Fix:       Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more.
+----------------------------------------------------------------
+[MEDIUM] IAM-003 — Deprecated cloud pod-identity annotation in use
+Object:    ServiceAccount/legacy-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml
+Evidence:  ServiceAccount of ServiceAccount/legacy-app (default) uses deprecated Azure AD Pod Identity (deprecated) annotation 'aadpodidentity.k8s.io/identity: /subscriptions/0000/resourcegroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/legacy-id'
+Fix:       Migrate from the deprecated Azure pod-identity annotation (aadpodidentity) to Azure Workload Identity (azure.workload.identity/client-id); pod-identity is retired and no longer receives security fixes.
+----------------------------------------------------------------
 [MEDIUM] IMG-001 — Image uses :latest or has no tag
 Object:    Deployment/debug-app (default)
 File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
@@ -207,8 +238,8 @@ Fix:       Pin the image to an exact version tag, e.g. nginx:1.27.4, never lates
 ----------------------------------------------------------------
 [MEDIUM] NET-001 — Namespace has workloads but no NetworkPolicy
 Object:    Namespace/default (default)
-File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
-Evidence:  namespace 'default' runs workloads (debug-app, ipc-pod, worker) but has no NetworkPolicy
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml
+Evidence:  namespace 'default' runs workloads (cloud-worker, debug-app, ipc-pod, worker) but has no NetworkPolicy
 Fix:       Add a NetworkPolicy for the namespace (a default-deny policy is a good start).
 ----------------------------------------------------------------
 [MEDIUM] NET-001 — Namespace has workloads but no NetworkPolicy
@@ -328,7 +359,7 @@ Fix:       Pin the image by digest (image@sha256:...) — tags are mutable, dige
 [LOW] RBAC-010 — ClusterRole uses aggregationRule
 Object:    ClusterRole/aggregated-view (-)
 File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
-Evidence:  ClusterRole uses aggregationRule with selector [{'matchLabels': {'rbac.example.com/aggregate-to-view': 'true'}}] — its effective rules expand at runtime
+Evidence:  ClusterRole uses aggregationRule with selector [{'matchLabels': {'rbac.example.com/aggregate-to-view': 'true'}}] — its effective rules expand at runtime — aggregates 1 role(s): ClusterRole/view-extra
 Fix:       Aggregated rules expand at runtime — review the roles matching the label selector; the audit may under-report this role.
 ----------------------------------------------------------------
 [LOW] WL-011 — Root filesystem is writable

@@ -1,0 +1,75 @@
+# RBACLens test manifests — BAD (cloud workload identity, v1.4)
+# Every flaw here is intentional, for testing the auditor only.
+# The Deployment itself is hardened (seccomp, drop ALL, limits, digest
+# image, no token mount) so that ONLY the IAM rules fire on this file.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloud-app
+  namespace: default
+  annotations:
+    # EKS IRSA: this pod inherits the AWS AdministratorAccess policy.
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/AdministratorAccess
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gke-app
+  namespace: default
+  annotations:
+    # GKE Workload Identity with a scoped service account: IAM-001
+    # only (the annotation carries no role info, so no IAM-002).
+    iam.gke.io/gcp-service-account: app@my-project.iam.gserviceaccount.com
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: legacy-app
+  namespace: default
+  annotations:
+    # Retired Azure AD Pod Identity: IAM-001 + IAM-003.
+    aadpodidentity.k8s.io/identity: /subscriptions/0000/resourcegroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/legacy-id
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloud-worker
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloud-worker
+  template:
+    metadata:
+      labels:
+        app: cloud-worker
+    spec:
+      serviceAccountName: cloud-app
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: nginx:1.27.4@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

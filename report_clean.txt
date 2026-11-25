@@ -1,8 +1,8 @@
 ================================================================
 RBACLens Report — Kubernetes RBAC and Workload Audit
 ================================================================
-Date: 2026-11-25 19:22:21
-Tool: RBACLens 1.3 (author: CyberBoy50)
+Date: 2026-11-25 19:47:28
+Tool: RBACLens 1.4 (author: CyberBoy50)
 Scanned: /home/hatch/workspace/rbaclens/test_manifests/clean
 
 DISCLAIMER — AUTHORIZED USE ONLY. This tool was built for
@@ -14,6 +14,7 @@ written permission to test — testing anything else may be
 illegal (for example, PECA 2016 in Pakistan).
 
 Inventory: 5 objects (1 Roles, 0 ClusterRoles, 1 RoleBindings, 0 ClusterRoleBindings, 1 ServiceAccounts, 1 workloads, 1 NetworkPolicies)
+CVE check: not run (use --cve to look images up in the NVD vulnerability database)
 
 Score: 100/100  (grade A)
 Findings: 0 total — 0 critical, 0 high, 0 medium, 0 low

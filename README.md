@@ -4,7 +4,7 @@ A command-line tool, written in Python, that reads a folder of Kubernetes
 YAML manifests and finds the permissions and workload settings attackers
 abuse — then grades the whole folder with a score and a letter grade.
 
-**Version:** 1.3
+**Version:** 1.4
 **Author:** CyberBoy50
 
 > Lab use only. Audit only manifests or clusters you own or have written
@@ -27,11 +27,12 @@ abuse — then grades the whole folder with a score and a letter grade.
 |---|---|
 | **RBAC** | Cluster-admin bindings (with the subject named), wildcard verbs / resources / API groups, `escalate` / `bind` / `impersonate` verbs, secret readers, pods/exec, anonymous or authenticated users, default ServiceAccount bound, aggregated ClusterRoles, bindings to roles that do not exist |
 | **Workloads** | Privileged containers, `allowPrivilegeEscalation`, hostNetwork / hostPID / hostIPC, hostPath volumes (docker.sock and `/` are Critical), run-as-root, missing CPU/memory requests or limits, auto-mounted service-account tokens, dangerous capabilities, writable root filesystem |
-| **Images** | `:latest` or untagged images, images not pinned by digest |
+| **Images** | `:latest` or untagged images, images not pinned by digest, known CVEs in the image (`--cve`, NVD lookup) |
 | **Network** | Namespaces with workloads but no NetworkPolicy |
 | **Pod Security** | Pod Security Standards (restricted profile): seccompProfile, capabilities drop ALL, only NET_BIND_SERVICE may be added |
+| **Cloud IAM** | Workload-identity annotations (EKS IRSA, GKE Workload Identity, Azure Workload Identity), over-broad cloud roles (AdministratorAccess, wildcard, Owner/Editor/Contributor), deprecated Azure pod-identity |
 
-28 rules in total — run `python run.py checks` (or `rbaclens.py --list-checks`)
+32 rules in total — run `python run.py checks` (or `rbaclens.py --list-checks`)
 to see them all with their severities.
 
 ## How it is better than the famous tools
@@ -45,7 +46,7 @@ Kubescape, kube-score, rbac-tool, Krane, KubeSec, Conftest and more):
 - **Files first, live cluster too (v1.1).** rbac-tool and Krane need a
   cluster and admin read access; RBACLens audits exported YAML anywhere,
   including CI and air-gapped labs — and with `--live` it audits your own
-  cluster through kubectl (read-only `get`), running the exact same 25
+  cluster through kubectl (read-only `get`), running the exact same 32
   rules on what is actually running.
 - **Image digest pinning.** No reviewed tool checks digests; RBACLens does.
 - **Score + grade.** Polaris-style 0–100 score and A–F grade, so a folder
@@ -124,7 +125,7 @@ Exit codes: `0` clean, `1` findings, `2` critical findings (or `--fail-on` hit).
 
 ## Live cluster mode (v1.1)
 
-The same 28 rules, run against what is actually deployed in your own
+The same 32 rules, run against what is actually deployed in your own
 cluster — through one read-only `kubectl get`. Nothing is created,
 changed or deleted on the cluster.
 
@@ -139,8 +140,8 @@ Requirements: `kubectl` on PATH and a working kubeconfig (a local
 `minikube` / `kind` cluster is enough to try it). Without a cluster,
 `python run.py doctor` says so and file scans still work. To test the
 live path without a real cluster, the step tests (step 8) run it against
-a fake `kubectl` that prints the bad test manifests — same 16 objects,
-same 57 findings.
+a fake `kubectl` that prints the bad test manifests — same 21 objects,
+same 62 findings.
 
 ## Pod Security Standards (v1.2)
 
@@ -164,12 +165,79 @@ The clean test manifests pass all three (seccompProfile RuntimeDefault,
 drop ALL, no adds); the bad folder fails them 5 + 5 + 1 times. The same
 three rules run in live mode too.
 
+## Image CVE lookup (v1.4)
+
+```bash
+python rbaclens.py ./my-manifests --cve -o report.txt
+```
+
+`--cve` looks each distinct container image up in the NVD vulnerability
+database (CPE match on the image name + exact `x.y.z` tag) and adds
+CVE-001 findings — High, or Critical when the highest CVSS is ≥ 9.0.
+Real result on the bad test folder: `busybox:1.37.0` has 2 CVEs
+(CVE-2025-46394, CVE-2025-60876); `nginx:1.27.4` has none. Images with
+no CPE mapping, or with a tag that is not an exact version (`:latest`,
+`redis:7`, `alpine:3.19`), are reported as *skipped with a reason*,
+never as clean. If NVD is unreachable or rate-limited, the check is
+marked *offline* in the report and JSON and the scan continues — no
+invented data, no crash. NVD allows 5 requests per 30 seconds without
+an API key (the tool waits 6.5 s between requests); set
+`RBACLENS_NVD_API_KEY` for the higher limit. OSV was tried first and
+ruled out: its API works, but it does not index container images.
+
+## Cloud IAM (v1.4)
+
+Manifest-level checks on ServiceAccounts and pod templates, no cluster
+and no cloud credentials needed:
+
+- **IAM-001** (Medium) — the ServiceAccount carries a workload-identity
+  annotation (EKS IRSA, GKE Workload Identity, Azure Workload Identity):
+  the pod inherits whatever the cloud role can do.
+- **IAM-002** (Critical) — the referenced cloud role is over-broad:
+  `AdministratorAccess`, a wildcard ARN, or Owner / Editor /
+  Contributor / admin. (GKE service-account emails and Azure client IDs
+  carry no role info, so they are never judged here.)
+- **IAM-003** (Medium) — the retired Azure AD Pod Identity annotation
+  (`aadpodidentity.k8s.io/identity`) is still in use; migrate to Azure
+  Workload Identity.
+
+## Enforcement (v1.4) — the tool no longer only reports
+
+```bash
+python rbaclens.py ./my-manifests --admission-out kyverno.yaml --gatekeeper-out gatekeeper.yaml --fix-out ./fixed
+python run.py scan ./my-manifests        # menu option 9 does all three at once
+```
+
+- `--admission-out FILE` — a Kyverno ClusterPolicy
+  (`validationFailureAction: Enforce`) that blocks the flagged patterns
+  at admission time: privileged containers, host namespaces, hostPath,
+  privilege escalation, run-as-root, dangerous capabilities, writable
+  root filesystem, seccomp, `:latest` images, token auto-mount, and
+  cluster-admin bindings.
+- `--gatekeeper-out FILE` — the same enforcement as an OPA Gatekeeper
+  bundle (ConstraintTemplate + Constraints, Rego).
+- `--fix-out DIR` — corrected copies of the manifests with the safe fixes
+  applied (booleans locked down, drop ALL, seccomp RuntimeDefault, token
+  mount off, default resource requests/limits) plus a `FIXES.md` listing
+  what needs a human (hostPath, cluster-admin, wildcards, image tags,
+  NetworkPolicy, cloud IAM, CVEs). Originals are never touched; review
+  the diff and re-scan the fixed folder before applying anything.
+
+A clean scan generates the full baseline policy instead of an empty one.
+Admission policies and fixed manifests are generated from the full
+findings, so `--min-severity` / `--check` filters never silently drop a
+category from the enforcement output. The policies are generated YAML —
+review them before `kubectl apply -f`, and test them in a cluster you own.
+
+An empty scan is not a clean scan: a folder with no manifests now exits
+2 with a loud error and no report (v1.3 scored it 100/A).
+
 ## Try it on the test manifests
 
 ```bash
-python run.py scan test_manifests/bad     # 57 findings, score 0/100, grade F
+python run.py scan test_manifests/bad     # 62 findings, score 0/100, grade F
 python run.py scan test_manifests/clean   # 0 findings, score 100/100, grade A
-python run.py test                        # the 8 step tests (incl. live mode)
+python run.py test                        # the 10 step tests (125 checks)
 ```
 
 ## Scoring
@@ -192,8 +260,8 @@ defensive lesson. `--json` writes the same data as JSON for pipelines.
 | `run.py` | Launcher — setup, scan, test, doctor (Windows / macOS / Linux) |
 | `run.bat` | Windows one-click — opens the menu |
 | `run.sh` | Linux / macOS one-click — opens the menu |
-| `test_rbaclens.py` | The 9 step tests (71 checks) |
-| `test_manifests/bad/` | Manifests with planted flaws (RBAC + workloads + List) |
+| `test_rbaclens.py` | The 10 step tests (125 checks) |
+| `test_manifests/bad/` | Manifests with planted flaws (RBAC + workloads + cloud IAM + List) |
 | `test_manifests/clean/` | Hardened manifests that must pass with zero findings |
 | `requirements.txt` | `pyyaml`, `colorama` |
 | `DEMO.md` | Demo and write-up with real run output |

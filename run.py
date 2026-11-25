@@ -5,7 +5,7 @@ Usage:
     python run.py setup        # create venv + install dependencies (first time)
     python run.py scan <path>  # audit a manifest file or folder
     python run.py live [--namespace NAME]  # audit a live cluster via kubectl
-    python run.py test         # run the 7 build-plan step tests (+ live test)
+    python run.py test         # run the 10 step tests (125 checks)
     python run.py doctor       # check the setup (incl. kubectl / cluster)
     python run.py checks       # list all checks
     python run.py inventory <path>  # show the RBAC inventory

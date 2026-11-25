@@ -1,31 +1,43 @@
 {
   "tool": "RBACLens",
-  "version": "1.3",
+  "version": "1.4",
   "author": "CyberBoy50",
   "disclaimer": "DISCLAIMER \u2014 AUTHORIZED USE ONLY. This tool was built for ethical, authorized security testing only. You are using it on your own responsibility. The authors are not responsible for how you use it, or for anything that happens because of your use. Only test systems, code, and data you own or have explicit written permission to test \u2014 testing anything else may be illegal (for example, PECA 2016 in Pakistan).",
-  "scanned_at": "2026-11-25 19:22:21",
+  "scanned_at": "2026-11-25 19:47:28",
   "path": "/home/hatch/workspace/rbaclens/test_manifests/bad",
   "inventory": {
-    "objects": 16,
+    "objects": 21,
     "roles": 2,
-    "cluster_roles": 3,
+    "cluster_roles": 4,
     "role_bindings": 3,
     "cluster_role_bindings": 2,
-    "service_accounts": 1,
-    "workloads": 5,
+    "service_accounts": 4,
+    "workloads": 6,
     "network_policies": 0
   },
   "parse_errors": [],
   "score": 0,
   "grade": "F",
   "summary": {
-    "critical": 7,
+    "critical": 8,
     "high": 23,
-    "medium": 16,
+    "medium": 20,
     "low": 11
   },
-  "total_findings": 57,
+  "total_findings": 62,
+  "cve": null,
   "findings": [
+    {
+      "rule": "IAM-002",
+      "title": "Cloud workload identity references an over-broad cloud role",
+      "severity": "critical",
+      "points": -25,
+      "object": "ServiceAccount/cloud-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml",
+      "evidence": "ServiceAccount of ServiceAccount/cloud-app (default) references the AWS AdministratorAccess policy 'arn:aws:iam::123456789012:role/AdministratorAccess'",
+      "remediation": "Replace the over-broad cloud role (AdministratorAccess, Owner/Editor/Contributor, or a wildcard role) with a narrowly scoped role that lists only the permissions the workload needs."
+    },
     {
       "rule": "RBAC-001",
       "title": "Binding grants the cluster-admin role",
@@ -357,6 +369,50 @@
       "remediation": "Drop the capability. Drop ALL capabilities and add back only what the container needs."
     },
     {
+      "rule": "IAM-001",
+      "title": "ServiceAccount is bound to a cloud workload identity",
+      "severity": "medium",
+      "points": -5,
+      "object": "ServiceAccount/cloud-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml",
+      "evidence": "ServiceAccount of ServiceAccount/cloud-app (default) carries AWS EKS IRSA annotation 'eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/AdministratorAccess' \u2014 the pod inherits the cloud role's permissions",
+      "remediation": "Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more."
+    },
+    {
+      "rule": "IAM-001",
+      "title": "ServiceAccount is bound to a cloud workload identity",
+      "severity": "medium",
+      "points": -5,
+      "object": "ServiceAccount/gke-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml",
+      "evidence": "ServiceAccount of ServiceAccount/gke-app (default) carries GKE Workload Identity annotation 'iam.gke.io/gcp-service-account: app@my-project.iam.gserviceaccount.com' \u2014 the pod inherits the cloud role's permissions",
+      "remediation": "Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more."
+    },
+    {
+      "rule": "IAM-001",
+      "title": "ServiceAccount is bound to a cloud workload identity",
+      "severity": "medium",
+      "points": -5,
+      "object": "ServiceAccount/legacy-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml",
+      "evidence": "ServiceAccount of ServiceAccount/legacy-app (default) carries Azure AD Pod Identity (deprecated) annotation 'aadpodidentity.k8s.io/identity: /subscriptions/0000/resourcegroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/legacy-id' \u2014 the pod inherits the cloud role's permissions",
+      "remediation": "Review the cloud identity mapping: the pod inherits whatever the cloud role can do. Scope the cloud role to the exact permissions the workload needs and no more."
+    },
+    {
+      "rule": "IAM-003",
+      "title": "Deprecated cloud pod-identity annotation in use",
+      "severity": "medium",
+      "points": -5,
+      "object": "ServiceAccount/legacy-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml",
+      "evidence": "ServiceAccount of ServiceAccount/legacy-app (default) uses deprecated Azure AD Pod Identity (deprecated) annotation 'aadpodidentity.k8s.io/identity: /subscriptions/0000/resourcegroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/legacy-id'",
+      "remediation": "Migrate from the deprecated Azure pod-identity annotation (aadpodidentity) to Azure Workload Identity (azure.workload.identity/client-id); pod-identity is retired and no longer receives security fixes."
+    },
+    {
       "rule": "IMG-001",
       "title": "Image uses :latest or has no tag",
       "severity": "medium",
@@ -374,8 +430,8 @@
       "points": -5,
       "object": "Namespace/default (default)",
       "namespace": "default",
-      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml",
-      "evidence": "namespace 'default' runs workloads (debug-app, ipc-pod, worker) but has no NetworkPolicy",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/cloud-bad.yaml",
+      "evidence": "namespace 'default' runs workloads (cloud-worker, debug-app, ipc-pod, worker) but has no NetworkPolicy",
       "remediation": "Add a NetworkPolicy for the namespace (a default-deny policy is a good start)."
     },
     {
@@ -595,7 +651,7 @@
       "object": "ClusterRole/aggregated-view (-)",
       "namespace": "default",
       "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml",
-      "evidence": "ClusterRole uses aggregationRule with selector [{'matchLabels': {'rbac.example.com/aggregate-to-view': 'true'}}] \u2014 its effective rules expand at runtime",
+      "evidence": "ClusterRole uses aggregationRule with selector [{'matchLabels': {'rbac.example.com/aggregate-to-view': 'true'}}] \u2014 its effective rules expand at runtime \u2014 aggregates 1 role(s): ClusterRole/view-extra",
       "remediation": "Aggregated rules expand at runtime \u2014 review the roles matching the label selector; the audit may under-report this role."
     },
     {
