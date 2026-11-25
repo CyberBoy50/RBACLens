@@ -1,0 +1,28 @@
+{
+  "tool": "RBACLens",
+  "version": "1.0",
+  "author": "CyberBoy50",
+  "scanned_at": "2026-11-25 18:40:08",
+  "path": "/home/hatch/workspace/rbaclens/test_manifests/clean",
+  "inventory": {
+    "objects": 5,
+    "roles": 1,
+    "cluster_roles": 0,
+    "role_bindings": 1,
+    "cluster_role_bindings": 0,
+    "service_accounts": 1,
+    "workloads": 1,
+    "network_policies": 1
+  },
+  "parse_errors": [],
+  "score": 100,
+  "grade": "A",
+  "summary": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "total_findings": 0,
+  "findings": []
+}

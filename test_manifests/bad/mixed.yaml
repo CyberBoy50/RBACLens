@@ -1,0 +1,45 @@
+# RBACLens test manifests — BAD (kind: List + ServiceAccount-level token)
+# Tests List flattening and SA-level automountServiceAccountToken.
+---
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: ipc-pod
+      namespace: default
+    spec:
+      hostIPC: true
+      containers:
+        - name: ipc
+          image: redis:7
+          # no securityContext, no resources
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: app-sa
+      namespace: dev
+    automountServiceAccountToken: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch
+  namespace: dev
+spec:
+  selector:
+    matchLabels:
+      app: batch
+  template:
+    metadata:
+      labels:
+        app: batch
+    spec:
+      serviceAccountName: app-sa
+      # no pod-level automountServiceAccountToken flag:
+      # the ServiceAccount's "true" applies, so the token is mounted
+      containers:
+        - name: batch
+          image: alpine:3.19
+          # no securityContext, no resources

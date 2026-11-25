@@ -1,0 +1,291 @@
+================================================================
+RBACLens Report — Kubernetes RBAC and Workload Audit
+================================================================
+Date: 2026-11-25 18:40:08
+Tool: RBACLens 1.0 (author: CyberBoy50)
+Scanned: /home/hatch/workspace/rbaclens/test_manifests/bad
+
+Inventory: 16 objects (2 Roles, 3 ClusterRoles, 3 RoleBindings, 2 ClusterRoleBindings, 1 ServiceAccounts, 5 workloads, 0 NetworkPolicies)
+
+Score: 0/100  (grade F)
+Findings: 46 total — 7 critical, 17 high, 11 medium, 11 low
+
+----------------------------------------------------------------
+[CRITICAL] RBAC-001 — Binding grants the cluster-admin role
+Object:    ClusterRoleBinding/superadmin (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  roleRef: ClusterRole/cluster-admin granted to ServiceAccount/superadmin (kube-system)
+Fix:       Replace cluster-admin with a scoped Role that lists only the verbs and resources the subject needs.
+----------------------------------------------------------------
+[CRITICAL] RBAC-001 — Binding grants the cluster-admin role
+Object:    RoleBinding/dev-admin (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  roleRef: ClusterRole/cluster-admin granted to User/alice@example.com
+Fix:       Replace cluster-admin with a scoped Role that lists only the verbs and resources the subject needs.
+----------------------------------------------------------------
+[CRITICAL] RBAC-002 — Wildcard verbs in a role rule
+Object:    ClusterRole/god-mode (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  rule #1 of ClusterRole/god-mode (-): verbs=['*'] resources=['*'] apiGroups=['*']
+Fix:       List the exact verbs the role needs (get, list, watch, ...) instead of '*'.
+----------------------------------------------------------------
+[CRITICAL] RBAC-005 — Dangerous verbs: escalate, bind or impersonate
+Object:    Role/deploy-manager (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  rule #1 of Role/deploy-manager (default): verbs include ['bind', 'escalate', 'impersonate']
+Fix:       Remove escalate/bind/impersonate unless the subject is a real RBAC administrator.
+----------------------------------------------------------------
+[CRITICAL] RBAC-008 — Binding grants access to anonymous / authenticated users
+Object:    RoleBinding/anon-read (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  subject system:anonymous has access to ClusterRole/view
+Fix:       Bind roles to named users, groups or service accounts — never to system:anonymous or system:authenticated.
+----------------------------------------------------------------
+[CRITICAL] WL-001 — Privileged container
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): securityContext.privileged: true
+Fix:       Remove privileged: true. A privileged container is root on the host.
+----------------------------------------------------------------
+[CRITICAL] WL-006 — hostPath volume mounted
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  volume 'docker-sock' mounts hostPath '/var/run/docker.sock' — full host access (docker socket / root filesystem)
+Fix:       Avoid hostPath. If a host path is truly needed, mount it read-only and only the exact directory.
+----------------------------------------------------------------
+[HIGH] RBAC-003 — Wildcard resources in a role rule
+Object:    ClusterRole/god-mode (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  rule #1 of ClusterRole/god-mode (-): verbs=['*'] resources=['*'] apiGroups=['*']
+Fix:       List the exact resources the role needs instead of '*'.
+----------------------------------------------------------------
+[HIGH] RBAC-004 — Wildcard API groups in a role rule
+Object:    ClusterRole/god-mode (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  rule #1 of ClusterRole/god-mode (-): verbs=['*'] resources=['*'] apiGroups=['*']
+Fix:       List the exact API groups the role needs instead of '*'.
+----------------------------------------------------------------
+[HIGH] RBAC-006 — Role can read secrets
+Object:    ClusterRole/secrets-reader (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  rule #1 of ClusterRole/secrets-reader (-): verbs=['get', 'list', 'watch'] on secrets
+Fix:       Scope secret access to the exact secret names (resourceNames) and the smallest verb set.
+----------------------------------------------------------------
+[HIGH] WL-002 — allowPrivilegeEscalation is true
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'backup' of CronJob/backup (dev): allowPrivilegeEscalation: true
+Fix:       Set allowPrivilegeEscalation: false in the container securityContext.
+----------------------------------------------------------------
+[HIGH] WL-003 — hostNetwork is true
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  spec.hostNetwork: true
+Fix:       Remove hostNetwork: true — the pod shares the node's network namespace.
+----------------------------------------------------------------
+[HIGH] WL-004 — hostPID is true
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  spec.hostPID: true
+Fix:       Remove hostPID: true — the pod can see and signal host processes.
+----------------------------------------------------------------
+[HIGH] WL-005 — hostIPC is true
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  spec.hostIPC: true
+Fix:       Remove hostIPC: true — the pod shares the node's IPC namespace.
+----------------------------------------------------------------
+[HIGH] WL-007 — Container can run as root (runAsNonRoot not set)
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'backup' of CronJob/backup (dev): runAsNonRoot is None, runAsUser is None
+Fix:       Set runAsNonRoot: true (pod and container securityContext) and runAsUser to a non-zero UID.
+----------------------------------------------------------------
+[HIGH] WL-007 — Container can run as root (runAsNonRoot not set)
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'batch' of Deployment/batch (dev): runAsNonRoot is None, runAsUser is None
+Fix:       Set runAsNonRoot: true (pod and container securityContext) and runAsUser to a non-zero UID.
+----------------------------------------------------------------
+[HIGH] WL-007 — Container can run as root (runAsNonRoot not set)
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): runAsNonRoot is None, runAsUser is None
+Fix:       Set runAsNonRoot: true (pod and container securityContext) and runAsUser to a non-zero UID.
+----------------------------------------------------------------
+[HIGH] WL-007 — Container can run as root (runAsNonRoot not set)
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'ipc' of Pod/ipc-pod (default): runAsNonRoot is None, runAsUser is None
+Fix:       Set runAsNonRoot: true (pod and container securityContext) and runAsUser to a non-zero UID.
+----------------------------------------------------------------
+[HIGH] WL-007 — Container can run as root (runAsNonRoot not set)
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'worker' of Pod/worker (default): runAsNonRoot is None, runAsUser is None
+Fix:       Set runAsNonRoot: true (pod and container securityContext) and runAsUser to a non-zero UID.
+----------------------------------------------------------------
+[HIGH] WL-009 — Service account token auto-mounted
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  service account token auto-mounted for 'default' (pod flag: None, ServiceAccount flag: None)
+Fix:       Set automountServiceAccountToken: false on the pod or the ServiceAccount if the workload does not call the API.
+----------------------------------------------------------------
+[HIGH] WL-009 — Service account token auto-mounted
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  service account token auto-mounted for 'default' (pod flag: None, ServiceAccount flag: None)
+Fix:       Set automountServiceAccountToken: false on the pod or the ServiceAccount if the workload does not call the API.
+----------------------------------------------------------------
+[HIGH] WL-009 — Service account token auto-mounted
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  service account token auto-mounted for 'default' (pod flag: None, ServiceAccount flag: None)
+Fix:       Set automountServiceAccountToken: false on the pod or the ServiceAccount if the workload does not call the API.
+----------------------------------------------------------------
+[HIGH] WL-009 — Service account token auto-mounted
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  service account token auto-mounted for 'default' (pod flag: None, ServiceAccount flag: None)
+Fix:       Set automountServiceAccountToken: false on the pod or the ServiceAccount if the workload does not call the API.
+----------------------------------------------------------------
+[HIGH] WL-010 — Dangerous Linux capability added
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): capabilities.add includes ['NET_ADMIN', 'SYS_ADMIN']
+Fix:       Drop the capability. Drop ALL capabilities and add back only what the container needs.
+----------------------------------------------------------------
+[MEDIUM] IMG-001 — Image uses :latest or has no tag
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): image 'nginx:latest' uses :latest or has no tag
+Fix:       Pin the image to an exact version tag, e.g. nginx:1.27.4, never latest and never untagged.
+----------------------------------------------------------------
+[MEDIUM] NET-001 — Namespace has workloads but no NetworkPolicy
+Object:    Namespace/default (default)
+Evidence:  namespace 'default' runs workloads (debug-app, ipc-pod, worker) but has no NetworkPolicy
+Fix:       Add a NetworkPolicy for the namespace (a default-deny policy is a good start).
+----------------------------------------------------------------
+[MEDIUM] NET-001 — Namespace has workloads but no NetworkPolicy
+Object:    Namespace/dev (default)
+Evidence:  namespace 'dev' runs workloads (backup, batch) but has no NetworkPolicy
+Fix:       Add a NetworkPolicy for the namespace (a default-deny policy is a good start).
+----------------------------------------------------------------
+[MEDIUM] RBAC-009 — Default ServiceAccount is bound to a role
+Object:    RoleBinding/default-sa (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  the default ServiceAccount is bound to Role/pod-reader
+Fix:       Create a dedicated ServiceAccount for the workload and bind the role to it.
+----------------------------------------------------------------
+[MEDIUM] RBAC-011 — Binding references a role that does not exist
+Object:    ClusterRoleBinding/missing-role (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  roleRef ClusterRole/does-not-exist does not exist in the scanned manifests
+Fix:       Fix the roleRef name, or create the role — a dangling binding grants nothing today but breaks silently when a role with that name appears.
+----------------------------------------------------------------
+[MEDIUM] WL-008 — Missing CPU/memory requests or limits
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'backup' of CronJob/backup (dev): missing cpu limits, memory limits, cpu requests, memory requests
+Fix:       Set resources.requests and resources.limits for CPU and memory on every container.
+----------------------------------------------------------------
+[MEDIUM] WL-008 — Missing CPU/memory requests or limits
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'batch' of Deployment/batch (dev): missing cpu limits, memory limits, cpu requests, memory requests
+Fix:       Set resources.requests and resources.limits for CPU and memory on every container.
+----------------------------------------------------------------
+[MEDIUM] WL-008 — Missing CPU/memory requests or limits
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): missing cpu limits, memory limits, cpu requests, memory requests
+Fix:       Set resources.requests and resources.limits for CPU and memory on every container.
+----------------------------------------------------------------
+[MEDIUM] WL-008 — Missing CPU/memory requests or limits
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'ipc' of Pod/ipc-pod (default): missing cpu limits, memory limits, cpu requests, memory requests
+Fix:       Set resources.requests and resources.limits for CPU and memory on every container.
+----------------------------------------------------------------
+[MEDIUM] WL-008 — Missing CPU/memory requests or limits
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'worker' of Pod/worker (default): missing cpu limits, memory limits, cpu requests, memory requests
+Fix:       Set resources.requests and resources.limits for CPU and memory on every container.
+----------------------------------------------------------------
+[MEDIUM] WL-009 — Service account token auto-mounted
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  service account token auto-mounted for 'app-sa' (pod flag: None, ServiceAccount flag: True)
+Fix:       Set automountServiceAccountToken: false on the pod or the ServiceAccount if the workload does not call the API.
+----------------------------------------------------------------
+[LOW] IMG-002 — Image is not pinned by digest
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'backup' of CronJob/backup (dev): image 'postgres:15' is not pinned by digest
+Fix:       Pin the image by digest (image@sha256:...) — tags are mutable, digests are not.
+----------------------------------------------------------------
+[LOW] IMG-002 — Image is not pinned by digest
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'batch' of Deployment/batch (dev): image 'alpine:3.19' is not pinned by digest
+Fix:       Pin the image by digest (image@sha256:...) — tags are mutable, digests are not.
+----------------------------------------------------------------
+[LOW] IMG-002 — Image is not pinned by digest
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): image 'nginx:latest' is not pinned by digest
+Fix:       Pin the image by digest (image@sha256:...) — tags are mutable, digests are not.
+----------------------------------------------------------------
+[LOW] IMG-002 — Image is not pinned by digest
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'ipc' of Pod/ipc-pod (default): image 'redis:7' is not pinned by digest
+Fix:       Pin the image by digest (image@sha256:...) — tags are mutable, digests are not.
+----------------------------------------------------------------
+[LOW] IMG-002 — Image is not pinned by digest
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'worker' of Pod/worker (default): image 'busybox:1.37.0' is not pinned by digest
+Fix:       Pin the image by digest (image@sha256:...) — tags are mutable, digests are not.
+----------------------------------------------------------------
+[LOW] RBAC-010 — ClusterRole uses aggregationRule
+Object:    ClusterRole/aggregated-view (-)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/rbac-bad.yaml
+Evidence:  ClusterRole uses aggregationRule with selector [{'matchLabels': {'rbac.example.com/aggregate-to-view': 'true'}}] — its effective rules expand at runtime
+Fix:       Aggregated rules expand at runtime — review the roles matching the label selector; the audit may under-report this role.
+----------------------------------------------------------------
+[LOW] WL-011 — Root filesystem is writable
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'backup' of CronJob/backup (dev): readOnlyRootFilesystem is not true
+Fix:       Set readOnlyRootFilesystem: true and use an emptyDir volume for any writable path.
+----------------------------------------------------------------
+[LOW] WL-011 — Root filesystem is writable
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'batch' of Deployment/batch (dev): readOnlyRootFilesystem is not true
+Fix:       Set readOnlyRootFilesystem: true and use an emptyDir volume for any writable path.
+----------------------------------------------------------------
+[LOW] WL-011 — Root filesystem is writable
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): readOnlyRootFilesystem is not true
+Fix:       Set readOnlyRootFilesystem: true and use an emptyDir volume for any writable path.
+----------------------------------------------------------------
+[LOW] WL-011 — Root filesystem is writable
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'ipc' of Pod/ipc-pod (default): readOnlyRootFilesystem is not true
+Fix:       Set readOnlyRootFilesystem: true and use an emptyDir volume for any writable path.
+----------------------------------------------------------------
+[LOW] WL-011 — Root filesystem is writable
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'worker' of Pod/worker (default): readOnlyRootFilesystem is not true
+Fix:       Set readOnlyRootFilesystem: true and use an emptyDir volume for any writable path.
+----------------------------------------------------------------
+
+Defensive lesson — least privilege in RBAC: give every subject only the permissions it needs, nothing more. A binding to cluster-admin hands over the whole cluster: read every secret, run code in any pod, change RBAC itself. Scope roles to exact verbs, resources and namespaces instead.
+
+Lab use only — audit only manifests you own or have written permission to audit.

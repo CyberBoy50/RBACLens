@@ -1,0 +1,65 @@
+# RBACLens test manifests — BAD (planted workload flaws)
+# Every flaw here is intentional, for testing the auditor only.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: debug-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: debug-app
+  template:
+    metadata:
+      labels:
+        app: debug-app
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: app
+          image: nginx:latest
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            capabilities:
+              add: ["SYS_ADMIN", "NET_ADMIN"]
+          # no resources, no runAsNonRoot, default ServiceAccount
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: worker
+  namespace: default
+spec:
+  containers:
+    - name: worker
+      image: busybox:1.37.0
+      command: ["sleep", "3600"]
+      # no securityContext, no resources, default ServiceAccount
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+  namespace: dev
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:15
+              securityContext:
+                allowPrivilegeEscalation: true
+              # no runAsNonRoot, no resources
