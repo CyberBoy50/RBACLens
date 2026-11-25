@@ -3,7 +3,7 @@
   "version": "1.4",
   "author": "CyberBoy50",
   "disclaimer": "DISCLAIMER \u2014 AUTHORIZED USE ONLY. This tool was built for ethical, authorized security testing only. You are using it on your own responsibility. The authors are not responsible for how you use it, or for anything that happens because of your use. Only test systems, code, and data you own or have explicit written permission to test \u2014 testing anything else may be illegal (for example, PECA 2016 in Pakistan).",
-  "scanned_at": "2026-11-25 19:47:28",
+  "scanned_at": "2026-11-25 19:49:28",
   "path": "/home/hatch/workspace/rbaclens/test_manifests/clean",
   "inventory": {
     "objects": 5,

@@ -275,3 +275,5 @@ defensive lesson. `--json` writes the same data as JSON for pipelines.
 needs, nothing more. A binding to `cluster-admin` hands over the whole
 cluster: read every secret, run code in any pod, change RBAC itself. Scope
 roles to exact verbs, resources and namespaces instead.
+
+License: MIT — see LICENSE

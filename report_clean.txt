@@ -1,7 +1,7 @@
 ================================================================
 RBACLens Report — Kubernetes RBAC and Workload Audit
 ================================================================
-Date: 2026-11-25 19:47:28
+Date: 2026-11-25 19:49:28
 Tool: RBACLens 1.4 (author: CyberBoy50)
 Scanned: /home/hatch/workspace/rbaclens/test_manifests/clean
 
