@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime
 
 VERSION = "1.0"
@@ -38,40 +39,83 @@ except Exception:  # pragma: no cover
 
 
 # ---------------------------------------------------------------- colours
+# TraceRecon style, like SSTIProbe: one class, short names.
 class C:
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-    BOLD = "\033[1m"
+    RST = "\033[0m"
+    BLD = "\033[1m"
     DIM = "\033[2m"
-    RESET = "\033[0m"
+    RED = "\033[1;31m"
+    GRN = "\033[1;32m"
+    YEL = "\033[1;33m"
+    BLU = "\033[1;34m"
+    MAG = "\033[1;35m"
+    CYN = "\033[1;36m"
+    WHT = "\033[1;37m"
+    # Old names, kept working.
+    GREEN = GRN
+    YELLOW = YEL
+    BLUE = BLU
+    CYAN = CYN
+    BOLD = BLD
+    RESET = RST
 
     @classmethod
     def disable(cls):
-        for attr in ("RED", "GREEN", "YELLOW", "BLUE", "CYAN", "BOLD", "DIM", "RESET"):
+        for attr in ("RST", "BLD", "DIM", "RED", "GRN", "YEL", "BLU", "MAG",
+                     "CYN", "WHT", "GREEN", "YELLOW", "BLUE", "CYAN",
+                     "BOLD", "RESET"):
             setattr(cls, attr, "")
 
 
+RED = C.RED
+GREEN = C.GRN
+YELLOW = C.YEL
+CYAN = C.CYN
+BOLD = C.BLD
+RESET = C.RST
+
+
+def clear():
+    """Clear the screen — GhostTrack / TraceRecon pattern.
+    Windows: cls, macOS/Linux: clear."""
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def sep(color=C.GRN, char="─", width=58):
+    """A rule line, TraceRecon style: sep(C.GRN, '─') / sep(C.GRN, '═')."""
+    print(f"{color}{char * width}{C.RST}")
+
+
+def header(title, color=C.GRN):
+    """A titled section header with rule lines above and below."""
+    sep(color)
+    print(f"{color} {title}{C.RST}")
+    sep(color)
+
+
 def ok(msg):
-    print(f"{C.GREEN}[+]{C.RESET} {msg}")
+    """[+] success line: ' [+] message' — white brackets, green plus."""
+    print(f" {C.WHT}[{C.GRN}+{C.WHT}]{C.RST} {msg}")
 
 
 def warn(msg):
-    print(f"{C.YELLOW}[!]{C.RESET} {msg}")
+    """[!] warning line, yellow."""
+    print(f" {C.WHT}[{C.YEL}!{C.WHT}]{C.RST} {C.YEL}{msg}{C.RST}")
 
 
 def err(msg):
-    print(f"{C.RED}[-]{C.RESET} {msg}")
+    """[x] error line, red."""
+    print(f" {C.WHT}[{C.RED}x{C.WHT}]{C.RST} {C.RED}{msg}{C.RST}")
 
 
-def info(msg):
-    print(f"{C.CYAN}[*]{C.RESET} {msg}")
-
-
-def sep(char="-", width=64):
-    print(C.DIM + char * width + C.RESET)
+def info(label, value=None, label_color=C.WHT, val_color=C.GRN):
+    """One aligned field — TraceRecon style:
+    ' Target                : value' (label 22 chars, white; value green).
+    Called with one argument it prints a plain [*] line, like before."""
+    if value is None:
+        print(f"{C.CYN}[*]{C.RST} {label}")
+        return
+    print(f" {label_color}{label:<22}{C.RST}: {val_color}{value}{C.RST}")
 
 
 def banner():
@@ -84,7 +128,19 @@ def banner():
     print()
     print(f"{C.CYAN}  RBACLens — Kubernetes RBAC and Workload Auditor{C.RESET}")
     print(f"{C.DIM}  Version {VERSION}  |  Author: {AUTHOR}{C.RESET}")
-    print(f"{C.YELLOW}  [!] LAB USE ONLY — audit only your own manifests, never a real cluster{C.RESET}")
+    print(
+        f"{C.YELLOW}  [!] LEGAL DISCLAIMER: Only audit manifests you own or have{C.RESET}"
+    )
+    print(
+        f"{C.YELLOW}      written permission to audit — your own files or lab.{C.RESET}"
+    )
+    # TraceRecon-style box under the banner, like SSTIProbe.
+    print(f"{C.GRN}")
+    print("┌" + "─" * 50 + "┐")
+    print("│" + ("RBACLens v" + VERSION + " — files only, no live cluster").center(50) + "│")
+    print("│" + "For authorized use only".center(50) + "│")
+    print("└" + "─" * 50 + "┘")
+    print(f"{C.RST}", end="")
     print()
 
 
@@ -771,6 +827,19 @@ def scan_path(path, args):
         err("PyYAML is not installed. Run: python run.py setup")
         err("  or: pip install pyyaml")
         return 2, [], 0, "F"
+    # Gobuster-style config block, like SSTIProbe's do_scan().
+    if not args.quiet:
+        header("SCAN")
+        info("Target", path)
+        info("Output", args.output)
+        info("JSON report", args.json or "—")
+        info("Min severity", args.min_severity or "all")
+        checks = args.check or "all 25"
+        if args.skip_check:
+            checks += " (skip %s)" % args.skip_check
+        info("Checks", checks)
+        info("Fail on", args.fail_on or "critical (default)")
+        sep()
     try:
         objects, errors = collect_manifests(path)
     except ValueError as exc:
@@ -842,9 +911,27 @@ def list_checks():
 
 
 # ---------------------------------------------------------------- menu
+# Same menu shape as SSTIProbe (GhostTrack / TraceRecon): clear screen,
+# banner, numbered options between '═' rule lines, then asks
+# "[ ? ] Select option : ". After each option: "Press enter to continue"
+# and loop back; Ctrl+C prints "[ ! ] Exit".
+MENU_OPTIONS = [
+    (1, "Scan a folder of manifests", "scan"),
+    (2, "Quick scan: test manifests (bad — planted flaws)", "bad"),
+    (3, "Quick scan: test manifests (clean — should pass)", "clean"),
+    (4, "Show RBAC inventory of a folder", "inventory"),
+    (5, "List all checks", "checks"),
+    (6, "Run step tests", "test"),
+    (7, "Check setup (doctor)", "doctor"),
+    (0, "Exit", None),
+]
+
+
 def ask(prompt, default=""):
+    """Ask one [?] question; Enter on its own takes the default."""
+    shown = f"{default}" if default else ""
     try:
-        value = input(f"{C.CYAN}[?]{C.RESET} {prompt} ").strip()
+        value = input(f"{C.CYN}[?]{C.RESET} {prompt} [{shown}]: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         raise
@@ -852,12 +939,49 @@ def ask(prompt, default=""):
 
 
 def menu_scan(args, default_path, default_output):
-    path = ask("Manifest folder or file:", default_path)
+    path = ask("ENTER MANIFEST FOLDER OR FILE", default_path)
     if not path:
         path = default_path
-    out = ask("Report file:", default_output)
+    out = ask("ENTER REPORT FILE", default_output)
     args.output = out or default_output
     return scan_path(path, args)
+
+
+def doctor():
+    """Menu option 7: is the setup ready? (SSTIProbe's menu option 5
+    checks the lab is reachable; RBACLens checks its own setup.)"""
+    header("SETUP CHECK")
+    ok("Python %s" % sys.version.split()[0])
+    if yaml is not None:
+        ok("PyYAML %s" % yaml.__version__)
+    else:
+        warn("PyYAML is NOT installed — run: python run.py setup")
+    base = os.path.dirname(os.path.abspath(__file__))
+    bad = os.path.join(base, "test_manifests", "bad")
+    clean = os.path.join(base, "test_manifests", "clean")
+    if os.path.isdir(bad):
+        ok("Test manifests (bad): %s" % bad)
+    else:
+        warn("Test manifests (bad) missing: %s" % bad)
+    if os.path.isdir(clean):
+        ok("Test manifests (clean): %s" % clean)
+    else:
+        warn("Test manifests (clean) missing: %s" % clean)
+    if yaml is None:
+        warn("Doctor: something is missing (see [!] lines above).")
+        return 1
+    ok("Doctor: all good. Run option 2 to scan the bad manifests.")
+    return 0
+
+
+def show_menu():
+    """Clear screen, banner, then the numbered menu."""
+    clear()
+    banner()
+    sep(C.GRN, "═")
+    for num, label, _key in MENU_OPTIONS:
+        print(f" {C.GRN}[{C.WHT}{num:>2}{C.GRN}]{C.RST} {C.WHT}{label}{C.RST}")
+    sep(C.GRN, "═")
 
 
 def menu(args):
@@ -865,56 +989,56 @@ def menu(args):
     bad = os.path.join(base, "test_manifests", "bad")
     clean = os.path.join(base, "test_manifests", "clean")
     while True:
-        banner()
-        print(f" {C.BOLD}[ 1]{C.RESET} Scan a folder of manifests")
-        print(f" {C.BOLD}[ 2]{C.RESET} Quick scan: test manifests (bad — planted flaws)")
-        print(f" {C.BOLD}[ 3]{C.RESET} Quick scan: test manifests (clean — should pass)")
-        print(f" {C.BOLD}[ 4]{C.RESET} Show RBAC inventory of a folder")
-        print(f" {C.BOLD}[ 5]{C.RESET} List all checks")
-        print(f" {C.BOLD}[ 6]{C.RESET} Run step tests")
-        print(f" {C.BOLD}[ 0]{C.RESET} Exit")
-        print()
+        show_menu()
         try:
-            choice = ask("Select option:", "1")
+            choice = input(f"{C.WHT}\n [ ? ] {C.GRN}Select option{C.WHT} : {C.GRN}").strip()
+            print(C.RST, end="")
+            if choice == "0":
+                print(f"\n{C.WHT}[ {C.RED}! {C.WHT}] {C.RED}Exit{C.RST}")
+                return 0
+            if choice == "1":
+                code, _f, _s, _g = menu_scan(args, ".", "rbaclens_report.txt")
+                print("Exit code: %d" % code)
+            elif choice == "2":
+                args.output = "report_bad.txt"
+                code, _f, _s, _g = scan_path(bad, args)
+                print("Exit code: %d" % code)
+            elif choice == "3":
+                args.output = "report_clean.txt"
+                code, _f, _s, _g = scan_path(clean, args)
+                print("Exit code: %d" % code)
+            elif choice == "4":
+                path = ask("ENTER MANIFEST FOLDER OR FILE", bad)
+                try:
+                    objects, errors = collect_manifests(path or bad)
+                except ValueError as exc:
+                    err(str(exc))
+                    objects, errors = [], []
+                if objects:
+                    print_inventory(Inventory(objects))
+                for e in errors:
+                    warn("Parse error: %s" % e)
+            elif choice == "5":
+                list_checks()
+            elif choice == "6":
+                import test_rbaclens
+                test_rbaclens.run_all_tests()
+            elif choice == "7":
+                doctor()
+            else:
+                err("Please input a number from the menu (0-7).")
+                time.sleep(1)
+                continue
         except (EOFError, KeyboardInterrupt):
-            print(f"{C.YELLOW}[!]{C.RESET} Exit")
+            print(f"\n{C.WHT}[ {C.RED}! {C.WHT}] {C.RED}Exit{C.RST}")
             return 0
-        if choice == "0":
-            return 0
-        if choice == "1":
-            code, _f, _s, _g = menu_scan(args, ".", "rbaclens_report.txt")
-            print("Exit code: %d" % code)
-        elif choice == "2":
-            args.output = "report_bad.txt"
-            code, _f, _s, _g = scan_path(bad, args)
-            print("Exit code: %d" % code)
-        elif choice == "3":
-            args.output = "report_clean.txt"
-            code, _f, _s, _g = scan_path(clean, args)
-            print("Exit code: %d" % code)
-        elif choice == "4":
-            path = ask("Manifest folder or file:", bad)
-            try:
-                objects, errors = collect_manifests(path or bad)
-            except ValueError as exc:
-                err(str(exc))
-                objects, errors = [], []
-            if objects:
-                print_inventory(Inventory(objects))
-            for e in errors:
-                warn("Parse error: %s" % e)
-        elif choice == "5":
-            list_checks()
-        elif choice == "6":
-            import test_rbaclens
-            test_rbaclens.run_all_tests()
-        else:
-            warn("Unknown option: %s" % choice)
+        # GhostTrack pattern: pause, then loop back to the menu.
         try:
-            input("Press enter to continue...")
+            input(f"\n{C.WHT}[ {C.GRN}+ {C.WHT}] {C.GRN}Press enter to continue{C.RST}")
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
+    return 0
 
 
 # ---------------------------------------------------------------- CLI
