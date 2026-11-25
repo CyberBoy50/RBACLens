@@ -1,8 +1,8 @@
 {
   "tool": "RBACLens",
-  "version": "1.1",
+  "version": "1.2",
   "author": "CyberBoy50",
-  "scanned_at": "2026-11-25 20:16:36",
+  "scanned_at": "2026-11-25 16:04:22",
   "path": "/home/hatch/workspace/rbaclens/test_manifests/bad",
   "inventory": {
     "objects": 16,
@@ -19,11 +19,11 @@
   "grade": "F",
   "summary": {
     "critical": 7,
-    "high": 17,
-    "medium": 11,
+    "high": 23,
+    "medium": 16,
     "low": 11
   },
-  "total_findings": 46,
+  "total_findings": 57,
   "findings": [
     {
       "rule": "RBAC-001",
@@ -101,6 +101,72 @@
       "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
       "evidence": "volume 'docker-sock' mounts hostPath '/var/run/docker.sock' \u2014 full host access (docker socket / root filesystem)",
       "remediation": "Avoid hostPath. If a host path is truly needed, mount it read-only and only the exact directory."
+    },
+    {
+      "rule": "PSS-002",
+      "title": "Pod Security Standards: capabilities.drop does not include ALL",
+      "severity": "high",
+      "points": -10,
+      "object": "CronJob/backup (dev)",
+      "namespace": "dev",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "container 'backup' of CronJob/backup (dev): capabilities.drop is [] (restricted profile needs drop: [ALL])",
+      "remediation": "Add capabilities.drop: [ALL] to the container."
+    },
+    {
+      "rule": "PSS-002",
+      "title": "Pod Security Standards: capabilities.drop does not include ALL",
+      "severity": "high",
+      "points": -10,
+      "object": "Deployment/batch (dev)",
+      "namespace": "dev",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml",
+      "evidence": "container 'batch' of Deployment/batch (dev): capabilities.drop is [] (restricted profile needs drop: [ALL])",
+      "remediation": "Add capabilities.drop: [ALL] to the container."
+    },
+    {
+      "rule": "PSS-002",
+      "title": "Pod Security Standards: capabilities.drop does not include ALL",
+      "severity": "high",
+      "points": -10,
+      "object": "Deployment/debug-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "container 'app' of Deployment/debug-app (default): capabilities.drop is [] (restricted profile needs drop: [ALL])",
+      "remediation": "Add capabilities.drop: [ALL] to the container."
+    },
+    {
+      "rule": "PSS-002",
+      "title": "Pod Security Standards: capabilities.drop does not include ALL",
+      "severity": "high",
+      "points": -10,
+      "object": "Pod/ipc-pod (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml",
+      "evidence": "container 'ipc' of Pod/ipc-pod (default): capabilities.drop is [] (restricted profile needs drop: [ALL])",
+      "remediation": "Add capabilities.drop: [ALL] to the container."
+    },
+    {
+      "rule": "PSS-002",
+      "title": "Pod Security Standards: capabilities.drop does not include ALL",
+      "severity": "high",
+      "points": -10,
+      "object": "Pod/worker (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "container 'worker' of Pod/worker (default): capabilities.drop is [] (restricted profile needs drop: [ALL])",
+      "remediation": "Add capabilities.drop: [ALL] to the container."
+    },
+    {
+      "rule": "PSS-003",
+      "title": "Pod Security Standards: capability added other than NET_BIND_SERVICE",
+      "severity": "high",
+      "points": -10,
+      "object": "Deployment/debug-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "container 'app' of Deployment/debug-app (default): capabilities.add includes ['CHOWN'] (restricted profile allows only NET_BIND_SERVICE)",
+      "remediation": "Remove the added capabilities; the restricted profile allows only NET_BIND_SERVICE."
     },
     {
       "rule": "RBAC-003",
@@ -321,6 +387,61 @@
       "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml",
       "evidence": "namespace 'dev' runs workloads (backup, batch) but has no NetworkPolicy",
       "remediation": "Add a NetworkPolicy for the namespace (a default-deny policy is a good start)."
+    },
+    {
+      "rule": "PSS-001",
+      "title": "Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost",
+      "severity": "medium",
+      "points": -5,
+      "object": "CronJob/backup (dev)",
+      "namespace": "dev",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "CronJob/backup (dev): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)",
+      "remediation": "Set spec.securityContext.seccompProfile.type to RuntimeDefault."
+    },
+    {
+      "rule": "PSS-001",
+      "title": "Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost",
+      "severity": "medium",
+      "points": -5,
+      "object": "Deployment/batch (dev)",
+      "namespace": "dev",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml",
+      "evidence": "Deployment/batch (dev): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)",
+      "remediation": "Set spec.securityContext.seccompProfile.type to RuntimeDefault."
+    },
+    {
+      "rule": "PSS-001",
+      "title": "Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost",
+      "severity": "medium",
+      "points": -5,
+      "object": "Deployment/debug-app (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "Deployment/debug-app (default): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)",
+      "remediation": "Set spec.securityContext.seccompProfile.type to RuntimeDefault."
+    },
+    {
+      "rule": "PSS-001",
+      "title": "Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost",
+      "severity": "medium",
+      "points": -5,
+      "object": "Pod/ipc-pod (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml",
+      "evidence": "Pod/ipc-pod (default): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)",
+      "remediation": "Set spec.securityContext.seccompProfile.type to RuntimeDefault."
+    },
+    {
+      "rule": "PSS-001",
+      "title": "Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost",
+      "severity": "medium",
+      "points": -5,
+      "object": "Pod/worker (default)",
+      "namespace": "default",
+      "file": "/home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml",
+      "evidence": "Pod/worker (default): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)",
+      "remediation": "Set spec.securityContext.seccompProfile.type to RuntimeDefault."
     },
     {
       "rule": "RBAC-009",

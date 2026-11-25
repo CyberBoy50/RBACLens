@@ -77,7 +77,7 @@ runAsNonRoot, missing limits and more; clean `web` reports nothing.
 fix for every finding, plus score and grade.
 
 **Test:** run the tool on two different test folders and check both
-reports are complete — `report_bad.txt` (46 findings, score 0, grade F)
+reports are complete — `report_bad.txt` (57 findings, score 0, grade F)
 and `report_clean.txt` (0 findings, score 100, grade A), plus the JSON
 report for the bad folder.
 
@@ -88,12 +88,12 @@ misconfigurations.
 
 **Test:** read the saved report from start to finish — every planted flaw
 appears with the right severity. Step 7 of the test suite asserts all 24
-rules fire on the bad folder (46 findings), the score is 0 with grade F,
+rules fire on the bad folder (57 findings), the score is 0 with grade F,
 and the clean folder scores 100 with zero findings.
 
 ## Step 8 — Live cluster mode (v1.1, PDF ke baad ka upgrade)
 
-**Write:** the same 25 rules, but the objects come from a live cluster
+**Write:** the same 28 rules, but the objects come from a live cluster
 instead of files — one read-only `kubectl get` (nothing is written to
 the cluster), parsed by the same StrictLoader, scanned by the same
 checks. Findings are tagged `live-cluster` instead of a file name.
@@ -105,5 +105,36 @@ a working kubeconfig — a local `minikube` / `kind` cluster is enough.
 
 **Test:** step 8 of the test suite runs the live path against a fake
 `kubectl` that prints the bad test manifests as a `kind: List` dump —
-same 16 objects, same 46 findings, score 0/100. A missing kubectl and a
+same 16 objects, same 57 findings, score 0/100. A missing kubectl and a
 failing kubectl both raise a loud error instead of scanning nothing.
+
+## Step 9 — Pod Security Standards (v1.2, PDF ke baad ka upgrade)
+
+**What:** Kubernetes ships an official baseline for how locked-down a
+pod must be — the Pod Security Standards, levels privileged / baseline /
+restricted. The restricted profile is the strictest, and most of it is
+already covered by the workload rules (privileged WL-001,
+allowPrivilegeEscalation WL-002, host namespaces WL-003/004/005, hostPath
+WL-006, runAsNonRoot WL-007, readOnlyRootFilesystem WL-011). v1.2 adds
+only the three genuinely new checks: PSS-001 (seccompProfile missing or
+not RuntimeDefault/Localhost, Medium, one finding per workload), PSS-002
+(capabilities.drop does not include ALL, High, one finding per
+container), PSS-003 (a capability added other than NET_BIND_SERVICE,
+High, one finding per container — never double-counting what WL-010
+already flags).
+
+**How:** the checks live in `check_workloads`, next to the rules they
+extend — PSS-001 in the per-workload block (pod `securityContext`), PSS-002
+and PSS-003 in the per-container loop, reusing the `capabilities.add`
+list WL-010 already computed. The clean fixture passes all three
+(seccompProfile RuntimeDefault, drop ALL, no adds); the bad fixture has
+no seccompProfile anywhere, no drop ALL anywhere, and one CHOWN add on
+the debug-app container, so it fails them 5 + 5 + 1 times.
+
+**Test:** Step 9 — synthetic workloads built in-memory: a bare pod fires
+PSS-001 + PSS-002, a fully restricted pod fires nothing, `Unconfined`
+seccomp fails PSS-001 while `Localhost` passes it, SYS_ADMIN fires WL-010
+only (no PSS-003 double-count), CHOWN fires PSS-003, and
+NET_BIND_SERVICE alone does not. The bad folder is now 57 findings
+(7 critical, 23 high, 16 medium, 11 low); the clean folder still scores
+100 with zero findings; the fake-kubectl live test finds the same 57.

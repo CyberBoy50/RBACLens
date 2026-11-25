@@ -1,14 +1,14 @@
 ================================================================
 RBACLens Report — Kubernetes RBAC and Workload Audit
 ================================================================
-Date: 2026-11-25 20:16:36
-Tool: RBACLens 1.1 (author: CyberBoy50)
+Date: 2026-11-25 16:04:22
+Tool: RBACLens 1.2 (author: CyberBoy50)
 Scanned: /home/hatch/workspace/rbaclens/test_manifests/bad
 
 Inventory: 16 objects (2 Roles, 3 ClusterRoles, 3 RoleBindings, 2 ClusterRoleBindings, 1 ServiceAccounts, 5 workloads, 0 NetworkPolicies)
 
 Score: 0/100  (grade F)
-Findings: 46 total — 7 critical, 17 high, 11 medium, 11 low
+Findings: 57 total — 7 critical, 23 high, 16 medium, 11 low
 
 ----------------------------------------------------------------
 [CRITICAL] RBAC-001 — Binding grants the cluster-admin role
@@ -52,6 +52,42 @@ Object:    Deployment/debug-app (default)
 File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
 Evidence:  volume 'docker-sock' mounts hostPath '/var/run/docker.sock' — full host access (docker socket / root filesystem)
 Fix:       Avoid hostPath. If a host path is truly needed, mount it read-only and only the exact directory.
+----------------------------------------------------------------
+[HIGH] PSS-002 — Pod Security Standards: capabilities.drop does not include ALL
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'backup' of CronJob/backup (dev): capabilities.drop is [] (restricted profile needs drop: [ALL])
+Fix:       Add capabilities.drop: [ALL] to the container.
+----------------------------------------------------------------
+[HIGH] PSS-002 — Pod Security Standards: capabilities.drop does not include ALL
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'batch' of Deployment/batch (dev): capabilities.drop is [] (restricted profile needs drop: [ALL])
+Fix:       Add capabilities.drop: [ALL] to the container.
+----------------------------------------------------------------
+[HIGH] PSS-002 — Pod Security Standards: capabilities.drop does not include ALL
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): capabilities.drop is [] (restricted profile needs drop: [ALL])
+Fix:       Add capabilities.drop: [ALL] to the container.
+----------------------------------------------------------------
+[HIGH] PSS-002 — Pod Security Standards: capabilities.drop does not include ALL
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  container 'ipc' of Pod/ipc-pod (default): capabilities.drop is [] (restricted profile needs drop: [ALL])
+Fix:       Add capabilities.drop: [ALL] to the container.
+----------------------------------------------------------------
+[HIGH] PSS-002 — Pod Security Standards: capabilities.drop does not include ALL
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'worker' of Pod/worker (default): capabilities.drop is [] (restricted profile needs drop: [ALL])
+Fix:       Add capabilities.drop: [ALL] to the container.
+----------------------------------------------------------------
+[HIGH] PSS-003 — Pod Security Standards: capability added other than NET_BIND_SERVICE
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  container 'app' of Deployment/debug-app (default): capabilities.add includes ['CHOWN'] (restricted profile allows only NET_BIND_SERVICE)
+Fix:       Remove the added capabilities; the restricted profile allows only NET_BIND_SERVICE.
 ----------------------------------------------------------------
 [HIGH] RBAC-003 — Wildcard resources in a role rule
 Object:    ClusterRole/god-mode (-)
@@ -172,6 +208,36 @@ Object:    Namespace/dev (default)
 File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
 Evidence:  namespace 'dev' runs workloads (backup, batch) but has no NetworkPolicy
 Fix:       Add a NetworkPolicy for the namespace (a default-deny policy is a good start).
+----------------------------------------------------------------
+[MEDIUM] PSS-001 — Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost
+Object:    CronJob/backup (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  CronJob/backup (dev): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)
+Fix:       Set spec.securityContext.seccompProfile.type to RuntimeDefault.
+----------------------------------------------------------------
+[MEDIUM] PSS-001 — Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost
+Object:    Deployment/batch (dev)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  Deployment/batch (dev): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)
+Fix:       Set spec.securityContext.seccompProfile.type to RuntimeDefault.
+----------------------------------------------------------------
+[MEDIUM] PSS-001 — Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost
+Object:    Deployment/debug-app (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  Deployment/debug-app (default): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)
+Fix:       Set spec.securityContext.seccompProfile.type to RuntimeDefault.
+----------------------------------------------------------------
+[MEDIUM] PSS-001 — Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost
+Object:    Pod/ipc-pod (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/mixed.yaml
+Evidence:  Pod/ipc-pod (default): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)
+Fix:       Set spec.securityContext.seccompProfile.type to RuntimeDefault.
+----------------------------------------------------------------
+[MEDIUM] PSS-001 — Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost
+Object:    Pod/worker (default)
+File:      /home/hatch/workspace/rbaclens/test_manifests/bad/workload-bad.yaml
+Evidence:  Pod/worker (default): seccompProfile.type is None (restricted profile needs RuntimeDefault or Localhost)
+Fix:       Set spec.securityContext.seccompProfile.type to RuntimeDefault.
 ----------------------------------------------------------------
 [MEDIUM] RBAC-009 — Default ServiceAccount is bound to a role
 Object:    RoleBinding/default-sa (default)

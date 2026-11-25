@@ -4,7 +4,7 @@ A command-line tool, written in Python, that reads a folder of Kubernetes
 YAML manifests and finds the permissions and workload settings attackers
 abuse — then grades the whole folder with a score and a letter grade.
 
-**Version:** 1.1
+**Version:** 1.2
 **Author:** CyberBoy50
 
 > Lab use only. Audit only manifests or clusters you own or have written
@@ -20,8 +20,9 @@ abuse — then grades the whole folder with a score and a letter grade.
 | **Workloads** | Privileged containers, `allowPrivilegeEscalation`, hostNetwork / hostPID / hostIPC, hostPath volumes (docker.sock and `/` are Critical), run-as-root, missing CPU/memory requests or limits, auto-mounted service-account tokens, dangerous capabilities, writable root filesystem |
 | **Images** | `:latest` or untagged images, images not pinned by digest |
 | **Network** | Namespaces with workloads but no NetworkPolicy |
+| **Pod Security** | Pod Security Standards (restricted profile): seccompProfile, capabilities drop ALL, only NET_BIND_SERVICE may be added |
 
-25 rules in total — run `python run.py checks` (or `rbaclens.py --list-checks`)
+28 rules in total — run `python run.py checks` (or `rbaclens.py --list-checks`)
 to see them all with their severities.
 
 ## How it is better than the famous tools
@@ -114,7 +115,7 @@ Exit codes: `0` clean, `1` findings, `2` critical findings (or `--fail-on` hit).
 
 ## Live cluster mode (v1.1)
 
-The same 25 rules, run against what is actually deployed in your own
+The same 28 rules, run against what is actually deployed in your own
 cluster — through one read-only `kubectl get`. Nothing is created,
 changed or deleted on the cluster.
 
@@ -130,12 +131,34 @@ Requirements: `kubectl` on PATH and a working kubeconfig (a local
 `python run.py doctor` says so and file scans still work. To test the
 live path without a real cluster, the step tests (step 8) run it against
 a fake `kubectl` that prints the bad test manifests — same 16 objects,
-same 46 findings.
+same 57 findings.
+
+## Pod Security Standards (v1.2)
+
+Kubernetes ships an official baseline for how locked-down a pod must be:
+the Pod Security Standards, levels privileged / baseline / restricted.
+The **restricted** profile is the strictest, and most of it is already
+covered by the workload rules (privileged WL-001, allowPrivilegeEscalation
+WL-002, host namespaces WL-003/004/005, hostPath WL-006, runAsNonRoot
+WL-007, readOnlyRootFilesystem WL-011). v1.2 adds the three genuinely
+new checks:
+
+- **PSS-001** (Medium) — no `seccompProfile`, or its type is not
+  `RuntimeDefault` / `Localhost`. One finding per workload.
+- **PSS-002** (High) — the container's `capabilities.drop` does not
+  include `ALL`. One finding per container.
+- **PSS-003** (High) — the container adds a capability other than
+  `NET_BIND_SERVICE`. Capabilities WL-010 already flags (e.g. SYS_ADMIN)
+  are never double-counted — PSS-003 fires only for the rest.
+
+The clean test manifests pass all three (seccompProfile RuntimeDefault,
+drop ALL, no adds); the bad folder fails them 5 + 5 + 1 times. The same
+three rules run in live mode too.
 
 ## Try it on the test manifests
 
 ```bash
-python run.py scan test_manifests/bad     # 46 findings, score 0/100, grade F
+python run.py scan test_manifests/bad     # 57 findings, score 0/100, grade F
 python run.py scan test_manifests/clean   # 0 findings, score 100/100, grade A
 python run.py test                        # the 8 step tests (incl. live mode)
 ```
@@ -160,12 +183,12 @@ defensive lesson. `--json` writes the same data as JSON for pipelines.
 | `run.py` | Launcher — setup, scan, test, doctor (Windows / macOS / Linux) |
 | `run.bat` | Windows one-click — opens the menu |
 | `run.sh` | Linux / macOS one-click — opens the menu |
-| `test_rbaclens.py` | The 7 build-plan step tests (43 checks) |
+| `test_rbaclens.py` | The 9 step tests (71 checks) |
 | `test_manifests/bad/` | Manifests with planted flaws (RBAC + workloads + List) |
 | `test_manifests/clean/` | Hardened manifests that must pass with zero findings |
 | `requirements.txt` | `pyyaml`, `colorama` |
 | `DEMO.md` | Demo and write-up with real run output |
-| `STEP_BY_STEP_GUIDE.md` | The 7 build steps, each with its test |
+| `STEP_BY_STEP_GUIDE.md` | The 7 build steps, each with its test, plus live mode and PSS |
 | `RESEARCH.md` / `RESEARCH_CLI_TOOLS.md` / `RESEARCH_IMPLEMENTATION.md` | Research notes on the famous tools |
 | `report_bad.txt`, `report_clean.txt` | Sample reports from the test manifests |
 

@@ -1,8 +1,8 @@
 ================================================================
 RBACLens Report — Kubernetes RBAC and Workload Audit
 ================================================================
-Date: 2026-11-25 20:16:36
-Tool: RBACLens 1.1 (author: CyberBoy50)
+Date: 2026-11-25 16:04:22
+Tool: RBACLens 1.2 (author: CyberBoy50)
 Scanned: /home/hatch/workspace/rbaclens/test_manifests/clean
 
 Inventory: 5 objects (1 Roles, 0 ClusterRoles, 1 RoleBindings, 0 ClusterRoleBindings, 1 ServiceAccounts, 1 workloads, 1 NetworkPolicies)

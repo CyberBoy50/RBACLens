@@ -10,8 +10,11 @@ Step 6 — CLI arguments and report (two folders, both reports complete)
 Step 7 — full run on a test folder (every planted flaw in the report)
 Step 8 — live-cluster mode (v1.1): a fake kubectl prints the bad
 manifests as a kind: List dump; collect_live() must find the same
-16 objects and 46 findings, and missing/failing kubectl must fail
+16 objects and 57 findings, and missing/failing kubectl must fail
 loudly instead of scanning nothing.
+Step 9 — Pod Security Standards (v1.2): PSS-001/002/003 on synthetic
+workloads — seccomp missing/wrong type, drop ALL missing, NET_BIND_SERVICE
+allowed, no double-count with WL-010.
 
 Run:  python run.py test        or        python test_rbaclens.py
 """
@@ -122,6 +125,23 @@ def step5():
     check("clean Deployment passes (no WL findings)",
           not [f for f in findings2 if f["rule"].startswith("WL-")],
           "(%d)" % len([f for f in findings2 if f["rule"].startswith("WL-")]))
+    # PSS on the fixtures: 5 workloads without seccomp, 5 containers
+    # without drop ALL, one CHOWN add (PSS-003) — clean passes all three.
+    pss = [f for f in findings if f["rule"].startswith("PSS-")]
+    check("PSS-001 fires once per workload (5)",
+          len([f for f in pss if f["rule"] == "PSS-001"]) == 5,
+          "(%d)" % len([f for f in pss if f["rule"] == "PSS-001"]))
+    check("PSS-002 fires once per container (5)",
+          len([f for f in pss if f["rule"] == "PSS-002"]) == 5,
+          "(%d)" % len([f for f in pss if f["rule"] == "PSS-002"]))
+    check("PSS-003 fires once (CHOWN)",
+          len([f for f in pss if f["rule"] == "PSS-003"]) == 1,
+          "(%d)" % len([f for f in pss if f["rule"] == "PSS-003"]))
+    check("PSS-003 names CHOWN, not the WL-010 caps",
+          any("CHOWN" in f["evidence"] and "SYS_ADMIN" not in f["evidence"]
+              for f in pss if f["rule"] == "PSS-003"))
+    check("clean workload passes all PSS rules",
+          not [f for f in findings2 if f["rule"].startswith("PSS-")])
 
 
 def step6():
@@ -153,11 +173,18 @@ def step7():
                 "RBAC-006", "RBAC-008", "RBAC-009", "RBAC-010", "RBAC-011",
                 "WL-001", "WL-002", "WL-003", "WL-004", "WL-005", "WL-006",
                 "WL-007", "WL-008", "WL-009", "WL-010", "WL-011",
-                "IMG-001", "IMG-002", "NET-001"}
+                "IMG-001", "IMG-002", "NET-001",
+                "PSS-001", "PSS-002", "PSS-003"}
     missing = expected - rules
     check("every planted flaw in the report", not missing,
           ("(missing: %s)" % ", ".join(sorted(missing))) if missing else
           "(%d findings, %d rules)" % (len(findings), len(rules)))
+    counts = rbaclens.summary_counts(findings)
+    check("bad folder: 57 findings", len(findings) == 57,
+          "(%d)" % len(findings))
+    check("bad folder: 7 critical, 23 high, 16 medium, 11 low",
+          counts == {"critical": 7, "high": 23, "medium": 16, "low": 11},
+          "(%s)" % counts)
     score = rbaclens.score_findings(findings)
     check("score is low for a bad folder", score < 60, "(score %d)" % score)
     check("grade is F", rbaclens.grade_for(score) == "F")
@@ -199,8 +226,11 @@ def step8():
         check("no parse errors", not errors)
         inv = rbaclens.Inventory(objects)
         findings = rbaclens.run_all_checks(inv)
-        check("live scan finds 46 findings", len(findings) == 46,
+        check("live scan finds 57 findings", len(findings) == 57,
               "(%d)" % len(findings))
+        check("live scan finds the PSS rules",
+              {"PSS-001", "PSS-002", "PSS-003"} <=
+              {f["rule"] for f in findings})
         check("live findings tagged live-cluster",
               all(f["file"] == "live-cluster" for f in findings))
         check("live scan finds cluster-admin",
@@ -236,10 +266,92 @@ def step8():
         shutil.rmtree(empty, ignore_errors=True)
 
 
+def _ctr(name, csc=None):
+    """A container with safe defaults, so only the planted PSS flaw fires."""
+    base = {"runAsNonRoot": True, "readOnlyRootFilesystem": True,
+            "allowPrivilegeEscalation": False}
+    base.update(csc or {})
+    return {"name": name,
+            "image": "nginx:1.27.4@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "securityContext": base,
+            "resources": {"requests": {"cpu": "100m", "memory": "128Mi"},
+                          "limits": {"cpu": "500m", "memory": "256Mi"}}}
+
+
+def _pod(name, pod_sc=None, containers=None):
+    """A Pod with safe defaults (no token mount, digest image, limits)."""
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "default"},
+            "spec": {"securityContext": pod_sc or {},
+                     "automountServiceAccountToken": False,
+                     "containers": containers or [_ctr("main")]},
+            "__file__": "synthetic"}
+
+
+def _pss(obj):
+    """PSS findings for one synthetic workload object."""
+    inv = rbaclens.Inventory([obj])
+    return [f for f in rbaclens.check_workloads(inv)
+            if f["rule"].startswith("PSS-")]
+
+
+def step9():
+    print("Step 9 — Pod Security Standards (v1.2)")
+    # Bare pod: no seccomp, no drop ALL -> PSS-001 + PSS-002, no PSS-003.
+    f = _pss(_pod("bare"))
+    check("bare pod: PSS-001 fires",
+          any(x["rule"] == "PSS-001" for x in f))
+    check("bare pod: PSS-002 fires",
+          any(x["rule"] == "PSS-002" for x in f))
+    check("bare pod: no PSS-003 (nothing added)",
+          not [x for x in f if x["rule"] == "PSS-003"])
+    # Fully restricted pod: RuntimeDefault + drop ALL + only NET_BIND_SERVICE.
+    ok = _pod("ok", pod_sc={"seccompProfile": {"type": "RuntimeDefault"}},
+              containers=[_ctr("main", {"capabilities": {
+                  "drop": ["ALL"], "add": ["NET_BIND_SERVICE"]}})])
+    check("restricted pod: no PSS findings", not _pss(ok))
+    # Wrong seccomp type still fails PSS-001; Localhost passes it.
+    check("Unconfined seccomp fails PSS-001",
+          any(x["rule"] == "PSS-001" for x in _pss(
+              _pod("unconfined",
+                   pod_sc={"seccompProfile": {"type": "Unconfined"}}))))
+    check("Localhost seccomp passes PSS-001",
+          not [x for x in _pss(
+              _pod("localhost",
+                   pod_sc={"seccompProfile": {"type": "Localhost"}}))
+              if x["rule"] == "PSS-001"])
+    # SYS_ADMIN is WL-010's — PSS-003 must NOT double-fire it.
+    inv = rbaclens.Inventory([_pod(
+        "sysadmin",
+        containers=[_ctr("main", {"capabilities": {"add": ["SYS_ADMIN"]}})])])
+    all_f = rbaclens.check_workloads(inv)
+    check("SYS_ADMIN fires WL-010",
+          any(x["rule"] == "WL-010" for x in all_f))
+    check("SYS_ADMIN does NOT fire PSS-003",
+          not [x for x in all_f if x["rule"] == "PSS-003"])
+    # CHOWN fires PSS-003; NET_BIND_SERVICE alone does not.
+    f = _pss(_pod("chown", containers=[_ctr(
+        "main", {"capabilities": {"add": ["CHOWN"]}})]))
+    check("CHOWN fires PSS-003",
+          len([x for x in f if x["rule"] == "PSS-003"]) == 1)
+    check("PSS-003 evidence names CHOWN",
+          any("CHOWN" in x["evidence"] for x in f
+              if x["rule"] == "PSS-003"))
+    f = _pss(_pod("mixed", containers=[_ctr(
+        "main", {"capabilities": {"add": ["CHOWN", "NET_BIND_SERVICE"]}})]))
+    check("CHOWN + NET_BIND_SERVICE: PSS-003 lists CHOWN only",
+          any("['CHOWN']" in x["evidence"]
+              for x in f if x["rule"] == "PSS-003"))
+    check("NET_BIND_SERVICE alone: no PSS-003",
+          not [x for x in _pss(_pod("bind", containers=[_ctr(
+              "main", {"capabilities": {"add": ["NET_BIND_SERVICE"]}})]))
+              if x["rule"] == "PSS-003"])
+
+
 def run_all_tests():
     print("RBACLens step tests")
     print("=" * 50)
-    for step in (step1, step2, step3, step4, step5, step6, step7, step8):
+    for step in (step1, step2, step3, step4, step5, step6, step7, step8, step9):
         step()
         print()
     print("=" * 50)

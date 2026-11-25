@@ -14,7 +14,7 @@ via kubectl (read-only `kubectl get`, nothing is written to the cluster).
 Point it at your own manifests or your own cluster, never at a cluster
 or a repository you do not own.
 
-Version: 1.1
+Version: 1.2
 """
 import argparse
 import io
@@ -27,7 +27,7 @@ import sys
 import time
 from datetime import datetime
 
-VERSION = "1.1"
+VERSION = "1.2"
 AUTHOR = "CyberBoy50"
 
 try:
@@ -204,6 +204,12 @@ RULES = {
                  "Pin the image by digest (image@sha256:...) — tags are mutable, digests are not."),
     "NET-001": ("Namespace has workloads but no NetworkPolicy", "medium",
                  "Add a NetworkPolicy for the namespace (a default-deny policy is a good start)."),
+    "PSS-001": ("Pod Security Standards: seccompProfile is missing or not RuntimeDefault/Localhost", "medium",
+                 "Set spec.securityContext.seccompProfile.type to RuntimeDefault."),
+    "PSS-002": ("Pod Security Standards: capabilities.drop does not include ALL", "high",
+                 "Add capabilities.drop: [ALL] to the container."),
+    "PSS-003": ("Pod Security Standards: capability added other than NET_BIND_SERVICE", "high",
+                 "Remove the added capabilities; the restricted profile allows only NET_BIND_SERVICE."),
 }
 
 DANGEROUS_CAPABILITIES = {
@@ -649,6 +655,14 @@ def check_workloads(inv):
             findings.append(make_finding(
                 "WL-005", obj, "spec.hostIPC: true"))
 
+        # PSS-001 seccompProfile (restricted profile) — one per workload.
+        seccomp = (pod_sc.get("seccompProfile") or {}).get("type")
+        if seccomp not in ("RuntimeDefault", "Localhost"):
+            findings.append(make_finding(
+                "PSS-001", obj,
+                "%s: seccompProfile.type is %s (restricted profile needs RuntimeDefault or Localhost)" % (
+                    obj_id(obj), seccomp)))
+
         # hostPath volumes — docker.sock and / are the worst.
         for vol in spec.get("volumes") or []:
             host_path = (vol.get("hostPath") or {}).get("path")
@@ -715,6 +729,22 @@ def check_workloads(inv):
                 findings.append(make_finding(
                     "WL-010", obj,
                     "%s: capabilities.add includes %s" % (where, bad_caps)))
+            # PSS-002 capabilities.drop must include ALL
+            drop = (csc.get("capabilities") or {}).get("drop") or []
+            if "ALL" not in drop:
+                findings.append(make_finding(
+                    "PSS-002", obj,
+                    "%s: capabilities.drop is %s (restricted profile needs drop: [ALL])" % (
+                        where, drop)))
+            # PSS-003 only NET_BIND_SERVICE may be added — and never
+            # double-count what WL-010 already flags.
+            extra = sorted(set(caps) - DANGEROUS_CAPABILITIES
+                           - {"NET_BIND_SERVICE"})
+            if extra:
+                findings.append(make_finding(
+                    "PSS-003", obj,
+                    "%s: capabilities.add includes %s (restricted profile allows only NET_BIND_SERVICE)" % (
+                        where, extra)))
             # WL-011 writable root filesystem
             if effective_sc(pod_sc, csc, "readOnlyRootFilesystem") is not True:
                 findings.append(make_finding(
