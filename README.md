@@ -46,7 +46,7 @@ Kubescape, kube-score, rbac-tool, Krane, KubeSec, Conftest and more):
 ## Install
 
 ```bash
-git clone https://github.com/<you>/RBACLens.git
+git clone https://github.com/CyberBoy50/RBACLens.git
 cd RBACLens
 python run.py setup        # first time only — creates venv, installs PyYAML
 ```
@@ -57,6 +57,26 @@ Or without the launcher, if PyYAML is already installed:
 pip install pyyaml
 python rbaclens.py --help
 ```
+
+## Runs on Linux, macOS and Windows
+
+One tool, all three — no separate builds, no Docker, no Go toolchain.
+`run.py` picks the right venv Python for your OS automatically
+(`venv/bin/python` on Linux/macOS, `venv\Scripts\python.exe` on Windows).
+You only need **Python 3.9+** and pip.
+
+| OS | Setup (first time) | Scan |
+|---|---|---|
+| **Linux** | `python3 run.py setup` | `python3 run.py scan ./my-manifests` |
+| **macOS** | `python3 run.py setup` | `python3 run.py scan ./my-manifests` |
+| **Windows** | `python run.py setup` | `python run.py scan .\my-manifests` |
+
+One-click, no commands at all:
+
+- **Windows:** double-click `run.bat` — the menu opens.
+- **Linux / macOS:** `bash run.sh` — the menu opens.
+
+Same commands, same output, same reports on every OS.
 
 ## Run it
 
@@ -114,7 +134,9 @@ defensive lesson. `--json` writes the same data as JSON for pipelines.
 | File | What it is |
 |---|---|
 | `rbaclens.py` | The tool — parsing, inventory, checks, scoring, reports, menu |
-| `run.py` | Launcher — setup, scan, test, doctor |
+| `run.py` | Launcher — setup, scan, test, doctor (Windows / macOS / Linux) |
+| `run.bat` | Windows one-click — opens the menu |
+| `run.sh` | Linux / macOS one-click — opens the menu |
 | `test_rbaclens.py` | The 7 build-plan step tests (43 checks) |
 | `test_manifests/bad/` | Manifests with planted flaws (RBAC + workloads + List) |
 | `test_manifests/clean/` | Hardened manifests that must pass with zero findings |
